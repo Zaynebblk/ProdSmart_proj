@@ -1,0 +1,9 @@
+{
+    "theme": "Dark",
+    "default_priority": "High",
+    "show_completed": true,
+    "task_reminders": true,
+    "enable_notifications": true,
+    "auto_start_pomodoro": false,
+    "sound_effects": true
+}
