@@ -25,10 +25,31 @@ def init_db():
             description TEXT,
             due_date TEXT,
             priority TEXT,
+            created_date TEXT,
+            completed_at TEXT,
             is_urgent INTEGER DEFAULT 0,
             is_important INTEGER DEFAULT 0,
             is_completed INTEGER DEFAULT 0
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            task_title TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            duration_min INTEGER,
+            status TEXT
+        )
+    """)
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN created_date TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()

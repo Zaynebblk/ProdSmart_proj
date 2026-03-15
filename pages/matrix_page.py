@@ -183,8 +183,8 @@ class Quadrant(QFrame):
         """)
         
         self.lbl_title.setStyleSheet(f"color: {c_text}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
-        self.lbl_sub.setStyleSheet(f"color: {c_text}; font-size: 10px; font-weight: bold; opacity: 0.7; letter-spacing: 1px; border: none; background: transparent;")
-        self.line.setStyleSheet(f"background-color: {c_border}; opacity: 0.5;")
+        self.lbl_sub.setStyleSheet(f"color: {c_sub_text}; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+        self.line.setStyleSheet(f"background-color: {c_border};")
 
         # Update all existing tasks inside
         for i in range(self.c_layout.count()):

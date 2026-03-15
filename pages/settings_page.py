@@ -239,7 +239,7 @@ class SettingsPage(QWidget):
     def create_section_header(self, text):
         lbl = QLabel(text)
         lbl.setObjectName("SettingsLabel")
-        lbl.setStyleSheet("font-size: 18px; font-weight: bold; margin-top: 10px;")
+        lbl.setStyleSheet("font-size: 18px; font-weight: bold;")
         return lbl
 
     def create_toggle_row(self, title, subtitle):
