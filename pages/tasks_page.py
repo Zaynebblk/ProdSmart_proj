@@ -6,8 +6,9 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QPushButton, QScrollArea, QDialog,
                              QLineEdit, QDateEdit, QComboBox, QMessageBox,
                              QCheckBox, QGraphicsDropShadowEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import QColor
+from PyQt6.QtMultimedia import QSoundEffect
 
 # --- STYLES HELPER ---
 def get_dialog_style(theme):
@@ -590,6 +591,14 @@ class TasksPage(QWidget):
     def __init__(self):
         super().__init__()
         self.current_theme = "Light"
+        self.task_reminders_enabled = True
+        self.sound_effects = True
+        self.enable_notifications = True
+        self._reminder_timer = QTimer(self)
+        self._reminder_timer.setInterval(60 * 1000)  # check every minute
+        self._reminder_timer.timeout.connect(self._check_reminders)
+        self._last_remind = {}  # map task_id -> datetime of last reminder
+        self._reminder_repeat_minutes = 10
         self.columns = []
         self.empty_state = None
         self.empty_title = None
@@ -669,6 +678,11 @@ class TasksPage(QWidget):
 
         self.init_db()
         self.refresh_tasks()
+        # Load settings (starts/stops reminder timer)
+        try:
+            self.apply_settings()
+        except Exception:
+            pass
 
     def showEvent(self, event):
         self.refresh_tasks()
@@ -891,6 +905,22 @@ class TasksPage(QWidget):
         )
         conn.commit()
         conn.close()
+        # Refresh UI so task disappears immediately when 'Show completed' is disabled
+        try:
+            self.refresh_tasks()
+        except Exception:
+            pass
+        # Notify other pages (matrix, etc.) about the change
+        try:
+            self.task_added.emit()
+        except Exception:
+            pass
+        # If completed, clear reminder tracking so it stops repeating
+        try:
+            if checked and t_id in self._last_remind:
+                del self._last_remind[t_id]
+        except Exception:
+            pass
 
     # --- Helpers BDD ---
     def save_task_to_db(self, data):
@@ -926,9 +956,24 @@ class TasksPage(QWidget):
 
         conn = self.get_db_connection()
         try:
-            rows = conn.execute(
-                "SELECT id, title, description, due_date, created_date, is_urgent, is_important FROM tasks WHERE is_completed=0 ORDER BY due_date"
-            ).fetchall()
+            # Respect user setting for showing completed tasks
+            show_completed = True
+            try:
+                if os.path.exists("settings.json"):
+                    with open("settings.json", "r") as sf:
+                        sdata = json.load(sf)
+                        show_completed = sdata.get("show_completed", True)
+            except:
+                pass
+
+            if show_completed:
+                rows = conn.execute(
+                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important FROM tasks ORDER BY due_date"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important FROM tasks WHERE is_completed=0 ORDER BY due_date"
+                ).fetchall()
             focus_rows = conn.execute(
                 "SELECT task_id, COALESCE(SUM(duration_min), 0) FROM pomodoro_sessions WHERE status='completed' GROUP BY task_id"
             ).fetchall()
@@ -985,6 +1030,107 @@ class TasksPage(QWidget):
         self.columns_layout.addStretch()
         self.chip_total.setText(f"{total_tasks} tasks")
         self.chip_due.setText(f"{due_today} due today")
+
+    # --- REMINDER HELPERS ---
+    def apply_settings(self):
+        """Load settings.json and enable/disable reminders and sounds accordingly."""
+        settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+        try:
+            if os.path.exists(settings_path):
+                with open(settings_path, "r") as f:
+                    data = json.load(f)
+                    self.task_reminders_enabled = data.get("task_reminders", True)
+                    self.enable_notifications = data.get("enable_notifications", True)
+                    self.sound_effects = data.get("sound_effects", True)
+                    self._reminder_repeat_minutes = int(data.get("reminder_repeat_minutes", 10))
+            else:
+                # defaults
+                self.task_reminders_enabled = True
+                self.enable_notifications = True
+                self.sound_effects = True
+        except Exception:
+            self.task_reminders_enabled = True
+            self.enable_notifications = True
+            self.sound_effects = True
+
+        # Setup sound
+        try:
+            sound_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "alarm.wav")
+            self._reminder_sound = QSoundEffect(self)
+            if os.path.exists(sound_path):
+                self._reminder_sound.setSource(QUrl.fromLocalFile(sound_path))
+                self._reminder_sound.setVolume(0.6)
+            else:
+                self._reminder_sound = None
+        except Exception:
+            self._reminder_sound = None
+
+        # Start/stop timer
+        try:
+            if self.task_reminders_enabled and self.enable_notifications:
+                if not self._reminder_timer.isActive():
+                    self._reminder_timer.start()
+                    # do an immediate check when enabling
+                    QTimer.singleShot(200, self._check_reminders)
+            else:
+                if self._reminder_timer.isActive():
+                    self._reminder_timer.stop()
+        except Exception:
+            pass
+
+    def _check_reminders(self):
+        """Check DB for tasks due today and not completed; show reminder once per task per session."""
+        if not getattr(self, "task_reminders_enabled", True):
+            return
+        if not getattr(self, "enable_notifications", True):
+            return
+
+        today_str = QDate.currentDate().toString("yyyy-MM-dd")
+        conn = self.get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT id, title FROM tasks WHERE due_date=? AND is_completed=0",
+                (today_str,)
+            ).fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+
+        from datetime import datetime
+        for r in rows:
+            try:
+                t_id = r[0]
+                title = r[1]
+                now = datetime.now()
+                last = self._last_remind.get(t_id)
+                should_remind = False
+                if last is None:
+                    should_remind = True
+                else:
+                    elapsed = (now - last).total_seconds() / 60.0
+                    if elapsed >= (self._reminder_repeat_minutes or 10):
+                        should_remind = True
+
+                if not should_remind:
+                    continue
+
+                # Play sound if enabled
+                if self.sound_effects and getattr(self, "_reminder_sound", None):
+                    try:
+                        self._reminder_sound.play()
+                    except Exception:
+                        pass
+
+                # Show popup reminder
+                try:
+                    QMessageBox.information(self, "Task Reminder", f"Reminder: '{title}' is due today.")
+                except Exception:
+                    pass
+
+                # Record last remind time
+                self._last_remind[t_id] = now
+            except Exception:
+                continue
 
     def start_pomodoro(self, t_id, title):
         self.pomodoro_requested.emit(t_id, title)

@@ -182,6 +182,18 @@ class SettingsPage(QWidget):
         self.toggle_reminders = result_reminders['toggle']
         tasks_layout.addLayout(result_reminders['layout'])
         
+        # Reminder repeat interval (minutes)
+        lbl_repeat = QLabel("Reminder repeat (min)")
+        lbl_repeat.setObjectName("SettingsLabel")
+        lbl_repeat.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.combo_repeat = QComboBox()
+        self.combo_repeat.addItems(["5", "10", "15", "30"])
+        self.combo_repeat.setMinimumHeight(40)
+        self.combo_repeat.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_repeat.setStyleSheet(self.combo_style)
+        tasks_layout.addWidget(lbl_repeat)
+        tasks_layout.addWidget(self.combo_repeat)
+        
         self.content_layout.addWidget(self.card_tasks)
 
 
@@ -290,6 +302,10 @@ class SettingsPage(QWidget):
                     # Toggles
                     self.toggle_completed.setChecked(data.get("show_completed", True))
                     self.toggle_reminders.setChecked(data.get("task_reminders", True))
+                    # Reminder repeat minutes
+                    repeat_min = str(data.get("reminder_repeat_minutes", 10))
+                    idx_repeat = self.combo_repeat.findText(repeat_min)
+                    if idx_repeat >= 0: self.combo_repeat.setCurrentIndex(idx_repeat)
                     self.toggle_notify.setChecked(data.get("enable_notifications", True))
                     self.toggle_autostart.setChecked(data.get("auto_start_pomodoro", False))
                     self.toggle_sound.setChecked(data.get("sound_effects", True))
@@ -302,6 +318,7 @@ class SettingsPage(QWidget):
             "default_priority": self.combo_priority.currentText(),
             "show_completed": self.toggle_completed.isChecked(),
             "task_reminders": self.toggle_reminders.isChecked(),
+            "reminder_repeat_minutes": int(self.combo_repeat.currentText()),
             "enable_notifications": self.toggle_notify.isChecked(),
             "auto_start_pomodoro": self.toggle_autostart.isChecked(),
             "sound_effects": self.toggle_sound.isChecked()

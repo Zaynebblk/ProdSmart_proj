@@ -887,6 +887,10 @@ class DashboardPage(QWidget):
     def _on_refresh_clicked(self):
         self._load_metrics_from_db()
 
+    def refresh_dashboard(self):
+        """Public method to refresh dashboard metrics (used by MainApp)."""
+        self._load_metrics_from_db()
+
     def _on_schedule_clicked(self):
         self.header_chip.setProperty("state", "saved")
         self.header_chip.setText("Saved")

@@ -1,9 +1,10 @@
 {
     "theme": "Dark",
-    "default_priority": "High",
-    "show_completed": true,
+    "default_priority": "Too Low",
+    "show_completed": false,
     "task_reminders": true,
+    "reminder_repeat_minutes": 30,
     "enable_notifications": true,
-    "auto_start_pomodoro": false,
+    "auto_start_pomodoro": true,
     "sound_effects": true
 }

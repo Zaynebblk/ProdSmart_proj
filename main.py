@@ -308,6 +308,11 @@ class MainApp(QMainWindow):
             
         if hasattr(self, 'page_tasks'):
             self.page_tasks.update_theme(theme)
+            # Ensure task list reflects any settings changes (e.g., show completed)
+            try:
+                self.page_tasks.refresh_tasks()
+            except Exception:
+                pass
 
         # We keep this for compatibility, even if it doesn't change history looks
         if hasattr(self, 'page_history'):
@@ -321,6 +326,24 @@ class MainApp(QMainWindow):
 
         if hasattr(self, 'page_quick_stats'):
             self.page_quick_stats.update_theme(theme)
+        # Pomodoro page has its own `apply_theme` which reloads settings like auto-start
+        if hasattr(self, 'page_pomodoro'):
+            try:
+                if hasattr(self.page_pomodoro, 'apply_theme'):
+                    self.page_pomodoro.apply_theme()
+                elif hasattr(self.page_pomodoro, 'update_theme'):
+                    self.page_pomodoro.update_theme(theme)
+            except Exception:
+                pass
+        # Tasks page: let it reload settings (reminders, sounds)
+        if hasattr(self, 'page_tasks'):
+            try:
+                if hasattr(self.page_tasks, 'apply_settings'):
+                    self.page_tasks.apply_settings()
+                elif hasattr(self.page_tasks, 'update_theme'):
+                    self.page_tasks.update_theme(theme)
+            except Exception:
+                pass
 
     # --- STYLE LIGHT ---
     def set_light_theme(self):
