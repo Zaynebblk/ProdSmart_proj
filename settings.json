@@ -1,7 +1,7 @@
 {
     "theme": "Dark",
     "default_priority": "Too Low",
-    "show_completed": false,
+    "show_completed": true,
     "task_reminders": true,
     "reminder_repeat_minutes": 30,
     "enable_notifications": true,

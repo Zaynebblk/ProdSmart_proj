@@ -5,9 +5,10 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QPushButton, QScrollArea, QDialog,
                              QLineEdit, QDateEdit, QComboBox, QMessageBox,
-                             QCheckBox, QGraphicsDropShadowEffect, QSizePolicy)
+                             QCheckBox, QGraphicsDropShadowEffect, QSizePolicy,
+                             QSystemTrayIcon)
 from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtMultimedia import QSoundEffect
 
 # --- STYLES HELPER ---
@@ -287,18 +288,18 @@ class TaskCard(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.accent_bar = QFrame()
+        self.accent_bar = QFrame(self)
         self.accent_bar.setFixedWidth(6)
         self.accent_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.accent_bar.setObjectName("TaskAccent")
 
-        accent_container = QWidget()
+        accent_container = QWidget(self)
         accent_container.setFixedWidth(12)
         accent_layout = QVBoxLayout(accent_container)
         accent_layout.setContentsMargins(6, 12, 0, 12)
         accent_layout.addWidget(self.accent_bar)
 
-        content = QWidget()
+        content = QWidget(self)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 18, 18, 18)
         layout.setSpacing(10)
@@ -308,11 +309,11 @@ class TaskCard(QFrame):
 
         # Header
         header = QHBoxLayout()
-        self.checkbox = QCheckBox()
+        self.checkbox = QCheckBox(content)
         self.checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.checkbox.toggled.connect(self.on_checked)
 
-        self.badge = QLabel(priority.upper())
+        self.badge = QLabel(priority.upper(), content)
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge.setFixedSize(78, 22)
         self.badge.setStyleSheet("font-size: 9px; font-weight: 900;")
@@ -322,11 +323,11 @@ class TaskCard(QFrame):
         header.addWidget(self.badge)
         layout.addLayout(header)
 
-        self.lbl_title = QLabel(title)
+        self.lbl_title = QLabel(title, content)
         self.lbl_title.setWordWrap(True)
         layout.addWidget(self.lbl_title)
 
-        self.lbl_desc = QLabel(desc if desc else "")
+        self.lbl_desc = QLabel(desc if desc else "", content)
         self.lbl_desc.setWordWrap(True)
         self.lbl_desc.setMaximumHeight(40)
         self.lbl_desc.setVisible(bool(desc))
@@ -337,25 +338,25 @@ class TaskCard(QFrame):
         dates_layout = QVBoxLayout()
         dates_layout.setSpacing(2)
 
-        self.lbl_created = QLabel(f"Created: {created_date_pretty}")
+        self.lbl_created = QLabel(f"Created: {created_date_pretty}", content)
         self.lbl_created.setWordWrap(True)
         self.lbl_created.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-        self.lbl_due = QLabel(f"Due: {due_date_pretty}")
+        self.lbl_due = QLabel(f"Due: {due_date_pretty}", content)
         self.lbl_due.setWordWrap(True)
         self.lbl_due.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         dates_layout.addWidget(self.lbl_created)
         dates_layout.addWidget(self.lbl_due)
 
-        self.lbl_focus = QLabel(f"Focus: {self.focus_minutes} min")
+        self.lbl_focus = QLabel(f"Focus: {self.focus_minutes} min", content)
         self.lbl_focus.setWordWrap(True)
         self.lbl_focus.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         dates_layout.addWidget(self.lbl_focus)
 
         actions_layout = QHBoxLayout()
         actions_layout.setSpacing(6)
-        self.btn_edit = QPushButton("EDIT")
+        self.btn_edit = QPushButton("EDIT", content)
         self.btn_edit.setFixedHeight(20)
         self.btn_edit.setMinimumWidth(52)
         self.btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -366,7 +367,7 @@ class TaskCard(QFrame):
         )
         self.btn_edit.clicked.connect(self.on_edit)
 
-        self.btn_del = QPushButton("DELETE")
+        self.btn_del = QPushButton("DELETE", content)
         self.btn_del.setFixedHeight(20)
         self.btn_del.setMinimumWidth(60)
         self.btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -377,7 +378,7 @@ class TaskCard(QFrame):
         )
         self.btn_del.clicked.connect(self.on_delete)
 
-        self.btn_focus = QPushButton("FOCUS")
+        self.btn_focus = QPushButton("FOCUS", content)
         self.btn_focus.setFixedHeight(20)
         self.btn_focus.setMinimumWidth(58)
         self.btn_focus.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -528,7 +529,7 @@ class DayColumn(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.panel = QFrame()
+        self.panel = QFrame(self)
         self.panel.setObjectName("DayPanel")
         self.panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -536,10 +537,10 @@ class DayColumn(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        self.lbl = QLabel(title)
+        self.lbl = QLabel(title, self.panel)
         layout.addWidget(self.lbl)
 
-        self.accent = QFrame()
+        self.accent = QFrame(self.panel)
         self.accent.setFixedHeight(3)
         self.accent.setMaximumWidth(70)
         layout.addWidget(self.accent)
@@ -599,6 +600,7 @@ class TasksPage(QWidget):
         self._reminder_timer.timeout.connect(self._check_reminders)
         self._last_remind = {}  # map task_id -> datetime of last reminder
         self._reminder_repeat_minutes = 10
+        self._tray = None
         self.columns = []
         self.empty_state = None
         self.empty_title = None
@@ -1032,6 +1034,27 @@ class TasksPage(QWidget):
         self.chip_due.setText(f"{due_today} due today")
 
     # --- REMINDER HELPERS ---
+    def _ensure_tray(self):
+        if self._tray is not None:
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ProdSmart.png")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setVisible(True)
+
+    def _show_notification(self, title, message):
+        if not getattr(self, "enable_notifications", True):
+            return
+        self._ensure_tray()
+        if self._tray:
+            self._tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+        else:
+            # Avoid modal popups that can flash during page switches.
+            # If tray isn't available, skip the popup.
+            pass
+
     def apply_settings(self):
         """Load settings.json and enable/disable reminders and sounds accordingly."""
         settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
@@ -1070,8 +1093,6 @@ class TasksPage(QWidget):
             if self.task_reminders_enabled and self.enable_notifications:
                 if not self._reminder_timer.isActive():
                     self._reminder_timer.start()
-                    # do an immediate check when enabling
-                    QTimer.singleShot(200, self._check_reminders)
             else:
                 if self._reminder_timer.isActive():
                     self._reminder_timer.stop()
@@ -1121,9 +1142,9 @@ class TasksPage(QWidget):
                     except Exception:
                         pass
 
-                # Show popup reminder
+                # Show reminder notification
                 try:
-                    QMessageBox.information(self, "Task Reminder", f"Reminder: '{title}' is due today.")
+                    self._show_notification("Task Reminder", f"Reminder: '{title}' is due today.")
                 except Exception:
                     pass
 

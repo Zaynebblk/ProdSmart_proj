@@ -4,9 +4,10 @@ import json
 import ctypes
 import traceback
 import signal
+import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
                              QVBoxLayout, QPushButton, QStackedWidget, QFrame, QLabel, QSizePolicy)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QObject, QEvent
 from PyQt6.QtGui import QIcon, QPixmap
 
 # --- IMPORTS ---
@@ -146,6 +147,12 @@ class MainApp(QMainWindow):
         self.main_layout.addWidget(self.content_stack)
         self.setCentralWidget(self.central_widget)
 
+        # Suppress tiny transient windows that can flash during page switches.
+        self._transient_blocker = _TransientWindowBlocker(self)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self._transient_blocker)
+
         # 3. BUTTON CONNECTIONS
         self.btn_tasks.clicked.connect(lambda: self.content_stack.setCurrentIndex(0))
         self.btn_dashboard.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
@@ -209,6 +216,8 @@ class MainApp(QMainWindow):
     def on_page_changed(self, index):
         """Auto-refresh data when clicking on a tab"""
         if index == 0:
+            if hasattr(self, "_transient_blocker"):
+                self._transient_blocker.suppress_for(1200)
             self.page_tasks.refresh_tasks()
             self._set_active_nav(self.btn_tasks)
         elif index == 1:
@@ -375,6 +384,18 @@ class MainApp(QMainWindow):
             QLabel#SettingsLabel { color: #1e293b; }
             QComboBox { background-color: white; border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px; color: #1e293b; }
             QComboBox QAbstractItemView { background-color: white; color: #1e293b; selection-background-color: #edf2f7; selection-color: #2563eb; }
+
+            /* QMessageBox (ensure readable text in light theme) */
+            QMessageBox { background-color: #ffffff; }
+            QMessageBox QLabel { color: #1e293b; }
+            QMessageBox QPushButton {
+                color: #1e293b;
+                background-color: #e2e8f0;
+                border: 1px solid #cbd5e1;
+                padding: 6px 12px;
+                border-radius: 6px;
+            }
+            QMessageBox QPushButton:hover { background-color: #cbd5e1; }
         """)
 
     # --- STYLE DARK ---
@@ -407,7 +428,97 @@ class MainApp(QMainWindow):
             QLabel#SettingsLabel { color: #e0e0e0; }
             QComboBox { background-color: #2d2d2d; border: 1px solid #444; border-radius: 6px; padding: 5px; color: white; }
             QComboBox QAbstractItemView { background-color: #2d2d2d; color: white; selection-background-color: #2563eb; selection-color: white; }
+
+            /* QMessageBox (ensure readable text in dark theme) */
+            QMessageBox { background-color: #1e1e1e; }
+            QMessageBox QLabel { color: #e0e0e0; }
+            QMessageBox QPushButton {
+                color: #e0e0e0;
+                background-color: #2b3038;
+                border: 1px solid #3b4350;
+                padding: 6px 12px;
+                border-radius: 6px;
+            }
+            QMessageBox QPushButton:hover { background-color: #3b4350; }
         """)
+
+
+class _TransientWindowBlocker(QObject):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._main_window = main_window
+        self._suppress_until = 0.0
+        self._debug = os.getenv("PRODSMART_DEBUG_WINDOWS") == "1"
+
+    def suppress_for(self, ms):
+        self._suppress_until = time.monotonic() + (ms / 1000.0)
+
+    def eventFilter(self, obj, event):
+        if not isinstance(obj, QWidget):
+            return False
+
+        et = event.type()
+        if obj is self._main_window:
+            return False
+
+        # Proactively block top-level QLabel windows before they ever show.
+        if isinstance(obj, QLabel) and obj.parent() is None:
+            if et in (QEvent.Type.Polish, QEvent.Type.PolishRequest, QEvent.Type.Show):
+                try:
+                    obj.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+                except Exception:
+                    pass
+                if self._debug and et == QEvent.Type.Show:
+                    try:
+                        text = obj.text()
+                    except Exception:
+                        text = ""
+                    try:
+                        pix = obj.pixmap()
+                    except Exception:
+                        pix = None
+                    print(f"[TransientBlocker] Blocked top-level QLabel text='{text}' has_pixmap={pix is not None}")
+                try:
+                    obj.hide()
+                    if et == QEvent.Type.Show:
+                        return True
+                except Exception:
+                    pass
+
+        if et == QEvent.Type.Show and obj.isWindow():
+            now = time.monotonic()
+            if self._debug:
+                try:
+                    title = obj.windowTitle()
+                    name = obj.objectName()
+                    w = obj.width()
+                    h = obj.height()
+                    flags = int(obj.windowFlags())
+                    parent = obj.parent().__class__.__name__ if obj.parent() else "None"
+                    extra = ""
+                    if isinstance(obj, QLabel):
+                        try:
+                            lbl_text = obj.text()
+                            extra = f" text='{lbl_text}'"
+                        except Exception:
+                            extra = ""
+                    print(f"[TransientBlocker] Show {obj.__class__.__name__} title='{title}' name='{name}' size={w}x{h} flags={flags} parent={parent}{extra}")
+                except Exception:
+                    pass
+            if now < self._suppress_until:
+                w = obj.width()
+                h = obj.height()
+                # Hide tiny/empty transient windows that can flash during page switches.
+                if w <= 420 and h <= 180:
+                    if self._debug:
+                        title = obj.windowTitle()
+                        print(f"[TransientBlocker] Hiding window: {obj.__class__.__name__} '{title}' {w}x{h}")
+                    try:
+                        obj.hide()
+                        return True
+                    except Exception:
+                        return False
+        return False
 
 if __name__ == "__main__":
     try:
