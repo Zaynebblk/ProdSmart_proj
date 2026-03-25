@@ -5,13 +5,14 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox,
                              QScrollArea, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty
 from PyQt6.QtGui import QPainter, QColor
+from resources.theme import get_theme, FONT_FAMILY, rgba
 
 # --- CUSTOM TOGGLE SWITCH CLASS ---
 class Toggle(QCheckBox):
     """
     A custom QCheckBox that looks like a modern iOS/Android toggle switch.
     """
-    def __init__(self, width=50, bg_color="#777", circle_color="#DDD", active_color="#3b82f6"):
+    def __init__(self, width=50, bg_color="#777", circle_color="#DDD", active_color="#3078CD"):
         super().__init__()
         self.setFixedSize(width, 28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -70,14 +71,37 @@ class Toggle(QCheckBox):
         p.end()
 
 
+class NoWheelComboBox(QComboBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ensure_font_size()
+
+    def _ensure_font_size(self):
+        font = self.font()
+        if font.pointSize() <= 0:
+            font.setPointSize(10)
+            self.setFont(font)
+        view = self.view()
+        if view:
+            view_font = view.font()
+            if view_font.pointSize() <= 0:
+                view_font.setPointSize(10)
+                view.setFont(view_font)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 # --- MAIN SETTINGS PAGE ---
 class SettingsPage(QWidget):
     settings_saved = pyqtSignal()
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("SettingsPage")
         self.setup_ui()
         self.load_current_setting()
+        self.update_theme("Light")
 
     def setup_ui(self):
         # Main Layout
@@ -99,7 +123,8 @@ class SettingsPage(QWidget):
         # Title
         title = QLabel("Settings")
         title.setObjectName("PageTitle")
-        title.setStyleSheet("font-size: 32px; font-weight: bold; color: #3b82f6; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 32px; font-weight: bold; color: #3078CD; margin-bottom: 10px;")
+        self.page_title = title
         self.content_layout.addWidget(title)
 
         # --- STYLE FOR COMBOBOXES ---
@@ -110,7 +135,7 @@ class SettingsPage(QWidget):
                 padding: 5px 10px;
                 background-color: #ffffff;
                 color: #333333;
-                font-size: 14px;
+                font-size: 10.5pt;
             }
             QComboBox::drop-down {
                 border: 0px;
@@ -118,7 +143,7 @@ class SettingsPage(QWidget):
             QComboBox QAbstractItemView {
                 background-color: #ffffff;
                 color: #333333;
-                selection-background-color: #3b82f6;
+                selection-background-color: #3078CD;
                 selection-color: #ffffff;
                 outline: 0px;
             }
@@ -136,7 +161,7 @@ class SettingsPage(QWidget):
         lbl_theme.setObjectName("SettingsLabel")
         lbl_theme.setStyleSheet("font-size: 14px; font-weight: bold;")
         
-        self.combo_theme = QComboBox()
+        self.combo_theme = NoWheelComboBox()
         self.combo_theme.addItems(["Light", "Dark"])
         self.combo_theme.setMinimumHeight(40)
         self.combo_theme.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -156,21 +181,13 @@ class SettingsPage(QWidget):
         tasks_layout.setContentsMargins(20, 20, 20, 20)
         tasks_layout.setSpacing(20)
 
-        # Default Priority
-        lbl_prio = QLabel("Default task priority")
-        lbl_prio.setObjectName("SettingsLabel")
-        lbl_prio.setStyleSheet("font-size: 14px; font-weight: bold;")
-        self.combo_priority = QComboBox()
-        
-        # --- MODIFIED LINE: ADDED "Too Low" ---
-        self.combo_priority.addItems(["Too Low", "Low", "Medium", "High"])
-        
-        self.combo_priority.setMinimumHeight(40)
-        self.combo_priority.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.combo_priority.setStyleSheet(self.combo_style)
-
-        tasks_layout.addWidget(lbl_prio)
-        tasks_layout.addWidget(self.combo_priority)
+        # Default Important
+        result_default_important = self.create_toggle_row(
+            "Default important",
+            "New tasks start marked as important"
+        )
+        self.toggle_default_important = result_default_important["toggle"]
+        tasks_layout.addLayout(result_default_important["layout"])
 
         # Show Completed
         result_completed = self.create_toggle_row("Show completed tasks", "Display completed tasks in the task list")
@@ -186,7 +203,7 @@ class SettingsPage(QWidget):
         lbl_repeat = QLabel("Reminder repeat (min)")
         lbl_repeat.setObjectName("SettingsLabel")
         lbl_repeat.setStyleSheet("font-size: 14px; font-weight: bold;")
-        self.combo_repeat = QComboBox()
+        self.combo_repeat = NoWheelComboBox()
         self.combo_repeat.addItems(["5", "10", "15", "30"])
         self.combo_repeat.setMinimumHeight(40)
         self.combo_repeat.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -231,16 +248,17 @@ class SettingsPage(QWidget):
         btn_save.clicked.connect(self.save_settings)
         btn_save.setStyleSheet("""
             QPushButton {
-                background-color: #3b82f6; 
+                background-color: #3078CD; 
                 color: white; 
                 padding: 15px; 
                 border-radius: 8px;
                 font-weight: bold;
                 font-size: 16px;
             }
-            QPushButton:hover { background-color: #2563eb; }
+            QPushButton:hover { background-color: #25456B; }
         """)
         self.content_layout.addWidget(btn_save)
+        self.save_button = btn_save
         self.content_layout.addStretch()
 
         # Finalize Scroll Area
@@ -250,8 +268,7 @@ class SettingsPage(QWidget):
     # --- HELPERS ---
     def create_section_header(self, text):
         lbl = QLabel(text)
-        lbl.setObjectName("SettingsLabel")
-        lbl.setStyleSheet("font-size: 18px; font-weight: bold;")
+        lbl.setObjectName("SettingsSection")
         return lbl
 
     def create_toggle_row(self, title, subtitle):
@@ -294,10 +311,12 @@ class SettingsPage(QWidget):
                     idx = self.combo_theme.findText(theme)
                     if idx >= 0: self.combo_theme.setCurrentIndex(idx)
 
-                    # Task Defaults
-                    prio = data.get("default_priority", "Medium")
-                    idx_prio = self.combo_priority.findText(prio)
-                    if idx_prio >= 0: self.combo_priority.setCurrentIndex(idx_prio)
+                    # Default important
+                    if "default_important" in data:
+                        self.toggle_default_important.setChecked(bool(data.get("default_important", False)))
+                    else:
+                        prio = str(data.get("default_priority", "")).strip().lower()
+                        self.toggle_default_important.setChecked(prio in ("high", "medium"))
 
                     # Toggles
                     self.toggle_completed.setChecked(data.get("show_completed", True))
@@ -315,7 +334,7 @@ class SettingsPage(QWidget):
     def save_settings(self):
         data = {
             "theme": self.combo_theme.currentText(),
-            "default_priority": self.combo_priority.currentText(),
+            "default_important": self.toggle_default_important.isChecked(),
             "show_completed": self.toggle_completed.isChecked(),
             "task_reminders": self.toggle_reminders.isChecked(),
             "reminder_repeat_minutes": int(self.combo_repeat.currentText()),
@@ -335,3 +354,89 @@ class SettingsPage(QWidget):
             QMessageBox.information(self, "Saved", "Settings saved successfully!")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not save settings: {e}")
+
+    def update_theme(self, theme):
+        c = get_theme(theme)
+        accent_soft = c.get("accent_soft", c["card"])
+        deep = c.get("deep", c["accent"])
+        self.setStyleSheet(
+            f"QWidget#SettingsPage {{ background: {c['bg']}; font-family: '{FONT_FAMILY}', 'Segoe UI'; }}"
+            f"QLabel#SettingsLabel {{ color: {c['text']}; }}"
+            f"QLabel#SettingsSection {{ color: {deep}; font-size: 18px; font-weight: 900; "
+            f"padding-bottom: 6px; border-bottom: 2px solid {accent_soft}; letter-spacing: 0.5px; }}"
+        )
+        if hasattr(self, "page_title"):
+            self.page_title.setStyleSheet(
+                f"font-size: 32px; font-weight: bold; color: {c['accent']}; margin-bottom: 10px;"
+            )
+
+        self.combo_style = f"""
+            QComboBox {{
+                border: 1px solid {c['border']};
+                border-radius: 8px;
+                padding: 5px 10px;
+                background-color: {c['input_bg']};
+                color: {c['text']};
+                font-size: 10.5pt;
+            }}
+            QComboBox:hover {{
+                border: 1px solid {c['accent']};
+                background-color: {rgba(c['input_bg'], 0.96)};
+            }}
+            QComboBox:focus {{
+                border: 1px solid {c['accent2']};
+                background-color: {rgba(c['input_bg'], 0.94)};
+            }}
+            QComboBox::drop-down {{
+                border: 0px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {c['card']};
+                color: {c['text']};
+                selection-background-color: {c['accent']};
+                selection-color: white;
+                outline: 0px;
+            }}
+        """
+
+        for combo in (self.combo_theme, self.combo_repeat):
+            if not combo:
+                continue
+            combo.setStyleSheet(self.combo_style)
+            try:
+                combo._ensure_font_size()
+            except Exception:
+                pass
+
+        card_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {rgba(c['card'], 0.96)}, stop:1 {rgba(accent_soft, 0.35)})"
+        for card in (self.card_theme, self.card_tasks, self.card_general):
+            card.setStyleSheet(
+                f"QFrame#SettingsCard {{ background: {card_bg}; border: 1px solid {c['border']}; "
+                f"border-left: 4px solid {c['accent']}; border-radius: 14px; }}"
+            )
+
+        if hasattr(self, "save_button"):
+            self.save_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {c['accent']};
+                    color: white;
+                    padding: 15px;
+                    border-radius: 8px;
+                    font-weight: bold;
+                    font-size: 16px;
+                }}
+                QPushButton:hover {{ background-color: {deep}; }}
+            """)
+
+        toggles = []
+        for attr in ("toggle_completed", "toggle_reminders", "toggle_notify", "toggle_autostart", "toggle_sound", "toggle_default_important"):
+            if hasattr(self, attr):
+                toggles.append(getattr(self, attr))
+        for t in toggles:
+            try:
+                t._bg_color = c["border"]
+                t._active_color = c["accent"]
+                t._circle_color = c["card"]
+                t.update()
+            except Exception:
+                pass

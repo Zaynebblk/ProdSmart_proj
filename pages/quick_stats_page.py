@@ -12,9 +12,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from datetime import datetime, timedelta
-import random
-import zlib
 from database.db_manager import get_db_connection
+from resources.theme import get_theme
 
 
 class EnergyTrendWidget(QFrame):
@@ -38,51 +37,43 @@ class EnergyTrendWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 6
+            right_pad = 6
+            top_pad = 6
+            bottom_pad = 10
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        rect = QRectF(self.rect())
-        left_pad = 6
-        right_pad = 6
-        top_pad = 6
-        bottom_pad = 10
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            values = self.values or []
+            if not values:
+                return
 
-        values = self.values or []
-        if not values:
-            return
+            count = len(values)
+            gap = 8
+            bar_w = (chart_rect.width() - gap * (count - 1)) / max(count, 1)
+            bar_w = max(6, bar_w)
 
-        count = len(values)
-        step = chart_rect.width() / max(count - 1, 1)
-        points = []
-        for idx, value in enumerate(values):
-            x = chart_rect.left() + idx * step
-            y = chart_rect.bottom() - (max(0.0, min(value, 1.0)) * chart_rect.height())
-            points.append(QPointF(x, y))
+            primary = QColor(self.colors.get("primary", "#11a4d4"))
+            soft = QColor(primary)
+            soft.setAlpha(90)
 
-        path = QPainterPath()
-        path.moveTo(points[0])
-        for pt in points[1:]:
-            path.lineTo(pt)
-
-        fill_path = QPainterPath(path)
-        fill_path.lineTo(chart_rect.right(), chart_rect.bottom())
-        fill_path.lineTo(chart_rect.left(), chart_rect.bottom())
-        fill_path.closeSubpath()
-
-        primary = QColor(self.colors.get("primary", "#11a4d4"))
-        fill = QColor(primary)
-        fill.setAlpha(60)
-        painter.fillPath(fill_path, fill)
-
-        pen = QPen(primary, 2.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawPath(path)
+            for idx, value in enumerate(values):
+                val = max(0.0, min(value, 1.0))
+                h = val * chart_rect.height()
+                x = chart_rect.left() + idx * (bar_w + gap)
+                y = chart_rect.bottom() - h
+                bar_rect = QRectF(x, y, bar_w, h)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(soft if idx < count - 1 else primary)
+                painter.drawRoundedRect(bar_rect, 6, 6)
+        finally:
+            painter.end()
 
 
 class QuickStatsPage(QWidget):
@@ -146,7 +137,7 @@ class QuickStatsPage(QWidget):
         self.metrics_grid.setHorizontalSpacing(10)
         self.metrics_grid.setVerticalSpacing(10)
         self.metric_cards = []
-        for idx, title in enumerate(("Focus Score", "Efficiency", "Distractions", "Energy")):
+        for idx, title in enumerate(("Session Duration", "Session Status", "Total Focus", "Sessions")):
             card = QFrame()
             card.setObjectName("QuickMetricCard")
             card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -170,19 +161,19 @@ class QuickStatsPage(QWidget):
             })
         self.content.addWidget(self.metrics_container)
 
-        # Energy trend
-        self.energy_title = QLabel("Energy Trend")
-        self.energy_sub = QLabel("Based on focus peaks")
+        # Recent sessions
+        self.energy_title = QLabel("Recent Sessions")
+        self.energy_sub = QLabel("Last 10 sessions (minutes)")
         self.content.addWidget(self.energy_title)
         self.content.addWidget(self.energy_sub)
         self.energy_chart = EnergyTrendWidget()
         self.content.addWidget(self.energy_chart)
 
         self.trend_labels = QHBoxLayout()
-        self.trend_start = QLabel("Start")
-        self.trend_mid1 = QLabel("15m")
-        self.trend_mid2 = QLabel("30m")
-        self.trend_end = QLabel("End")
+        self.trend_start = QLabel("Oldest")
+        self.trend_mid1 = QLabel("")
+        self.trend_mid2 = QLabel("")
+        self.trend_end = QLabel("Latest")
         self.trend_labels.addWidget(self.trend_start)
         self.trend_labels.addStretch()
         self.trend_labels.addWidget(self.trend_mid1)
@@ -229,32 +220,7 @@ class QuickStatsPage(QWidget):
 
     def update_theme(self, theme):
         self.current_theme = theme
-        if theme == "Dark":
-            self.colors = {
-                "bg": "#101d22",
-                "card": "#0f1b20",
-                "border": "#1f2a2f",
-                "text": "#f1f5f9",
-                "sub": "#94a3b8",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.18)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.35)",
-                "good": "#34d399",
-                "bad": "#f87171",
-            }
-        else:
-            self.colors = {
-                "bg": "#f6f8f8",
-                "card": "#ffffff",
-                "border": "#e2e8f0",
-                "text": "#0f172a",
-                "sub": "#64748b",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.12)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.25)",
-                "good": "#10b981",
-                "bad": "#ef4444",
-            }
+        self.colors = get_theme(theme)
 
         self.apply_styles()
 
@@ -265,13 +231,13 @@ class QuickStatsPage(QWidget):
             f"QFrame#QuickHeader {{ background: {c['bg']}; border-bottom: 1px solid {c['primary_soft_border']}; }}"
         )
         self.back_btn.setStyleSheet(
-            f"QPushButton#QuickBackButton {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 18px; color: {c['text']}; font-weight: 700; }}"
+            f"QPushButton#QuickBackButton {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 18px; color: {c['text']}; font-weight: bold; }}"
         )
         self.header_title.setStyleSheet(
             f"color: {c['text']}; font-size: 16px; font-weight: 800;"
         )
         self.kicker.setStyleSheet(
-            f"color: {c['primary']}; font-size: 10px; font-weight: 900; text-transform: uppercase;"
+            f"color: {c['primary']}; font-size: 10px; font-weight: 900;"
         )
         self.session_title.setStyleSheet(
             f"color: {c['text']}; font-size: 18px; font-weight: 900;"
@@ -285,7 +251,7 @@ class QuickStatsPage(QWidget):
                 f"QFrame#QuickMetricCard {{ background: {c['primary_soft']}; border: 1px solid {c['primary_soft_border']}; border-radius: 12px; }}"
             )
             item["title"].setStyleSheet(
-                f"color: {c['sub']}; font-size: 9px; font-weight: 700; text-transform: uppercase;"
+                f"color: {c['sub']}; font-size: 9px; font-weight: 700;"
             )
             item["value"].setStyleSheet(
                 f"color: {c['text']}; font-size: 18px; font-weight: 900;"
@@ -302,7 +268,7 @@ class QuickStatsPage(QWidget):
         )
         for lbl in (self.trend_start, self.trend_mid1, self.trend_mid2, self.trend_end):
             lbl.setStyleSheet(
-                f"color: {c['sub']}; font-size: 9px; font-weight: 800; text-transform: uppercase;"
+                f"color: {c['sub']}; font-size: 9px; font-weight: 800;"
             )
 
         for item in self.detail_rows:
@@ -317,7 +283,7 @@ class QuickStatsPage(QWidget):
             )
 
         self.done_btn.setStyleSheet(
-            f"QPushButton#QuickDoneButton {{ background: {c['primary']}; color: white; border: none; border-radius: 12px; padding: 10px; font-size: 12px; font-weight: 900; }}"
+            f"QPushButton#QuickDoneButton {{ background-color: {c['primary']}; color: white; border: none; border-radius: 12px; padding: 10px; font-size: 12px; font-weight: bold; }}"
         )
         self.energy_chart.set_theme(c)
 
@@ -335,49 +301,11 @@ class QuickStatsPage(QWidget):
         except Exception:
             return None
 
-    def _seed_from(self, activity_id, dt_start, duration):
-        raw = f"{activity_id}|{dt_start.isoformat() if dt_start else ''}|{duration}"
-        return zlib.adler32(raw.encode("utf-8"))
-
-    def _generate_energy_series(self, duration, seed):
-        if duration <= 0:
-            return [0.6, 0.72, 0.84, 0.9, 0.85, 0.7, 0.76, 0.88, 0.82, 0.65]
-        count = 10 if duration <= 60 else 12
-        rnd = random.Random(seed)
-        base = 0.55 + min(duration, 120) / 220
-        trend = rnd.uniform(-0.12, 0.12)
-        values = []
-        for idx in range(count):
-            t = idx / max(count - 1, 1)
-            drift = (t - 0.5) * trend * 2
-            noise = rnd.uniform(-0.08, 0.08)
-            dip = -0.06 if (0.35 < t < 0.55 and rnd.random() < 0.5) else 0
-            val = base + drift + noise + dip
-            values.append(max(0.35, min(1.0, val)))
-        return values
-
-    def _summarize_series(self, values):
-        if not values:
-            return {"avg": 0, "min": 0, "max": 0, "variability": 0}
-        avg = sum(values) / len(values)
-        min_val = min(values)
-        max_val = max(values)
-        return {
-            "avg": avg,
-            "min": min_val,
-            "max": max_val,
-            "variability": (max_val - min_val)
-        }
-
-    def _calc_efficiency(self, summary):
-        avg = summary["avg"] * 100
-        variability = summary["variability"] * 100
-        score = avg - variability * 0.25 + 8
-        return int(max(50, min(99, score)))
-
-    def _calc_focus_score(self, summary):
-        avg = summary["avg"]
-        return min(9.9, max(3.5, avg * 9.5))
+    def _format_minutes(self, minutes):
+        minutes = int(minutes or 0)
+        if minutes == 1:
+            return "1 min"
+        return f"{minutes} min"
 
     def load_activity(self, activity_id):
         if not activity_id:
@@ -417,9 +345,10 @@ class QuickStatsPage(QWidget):
                     (task_id,)
                 ).fetchone()
 
-        conn.close()
-
+        task_id = None
+        has_session = False
         if session:
+            has_session = True
             dt_start = self._parse_dt(session["started_at"])
             duration = int(session["duration_min"] or 0)
             if session["ended_at"]:
@@ -427,13 +356,23 @@ class QuickStatsPage(QWidget):
             else:
                 dt_end = dt_start + timedelta(minutes=duration) if dt_start else None
             title = session["task_title"] or (task["title"] if task else "Focus Session")
-            status = "Focus Session"
+            status_raw = str(session["status"] or "").strip().lower()
+            if status_raw == "completed":
+                status = "Completed"
+            elif status_raw == "stopped":
+                status = "Stopped"
+            elif status_raw:
+                status = status_raw.title()
+            else:
+                status = "Focus Session"
+            task_id = session["task_id"]
         elif task:
             dt_start = self._parse_dt(task["completed_at"])
             duration = 0
             dt_end = None
             title = task["title"]
-            status = "Completed"
+            status = "Completed" if task["is_completed"] else "Task"
+            task_id = task["id"]
         else:
             dt_start = datetime.now()
             duration = 0
@@ -445,24 +384,36 @@ class QuickStatsPage(QWidget):
         self.session_title.setText(title)
         self.session_subtitle.setText(f"{status} - {date_label}")
 
-        seed = self._seed_from(activity_id, dt_start, duration)
-        energy_values = self._generate_energy_series(duration, seed)
-        summary = self._summarize_series(energy_values)
-        focus_score = self._calc_focus_score(summary)
-        efficiency = self._calc_efficiency(summary)
-        distractions = max(0, min(6, int(round(summary["variability"] * 20)))) if duration else 0
-        energy_text = "Stable" if summary["variability"] < 0.2 else "Variable"
-
-        focus_delta = "+5%" if focus_score >= 7.5 else "-3%" if focus_score <= 5.5 else "+1%"
-        eff_delta = "+4%" if efficiency >= 85 else "-3%" if efficiency <= 70 else "+1%"
-        distraction_note = "No impact" if distractions <= 1 else "Minor impact"
-        energy_note = "Constant" if energy_text == "Stable" else "Fluctuating"
+        total_sessions = 0
+        total_minutes = 0
+        recent_durations = []
+        if task_id is not None:
+            summary_row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(duration_min), 0) "
+                "FROM pomodoro_sessions "
+                "WHERE task_id = ? AND status IN ('completed', 'stopped')",
+                (task_id,)
+            ).fetchone()
+            if summary_row:
+                total_sessions = int(summary_row[0] or 0)
+                total_minutes = int(summary_row[1] or 0)
+            recent_rows = conn.execute(
+                "SELECT duration_min FROM pomodoro_sessions "
+                "WHERE task_id = ? AND status IN ('completed', 'stopped') "
+                "ORDER BY started_at DESC LIMIT 10",
+                (task_id,)
+            ).fetchall()
+            recent_durations = [int(row[0] or 0) for row in reversed(recent_rows)]
+        elif duration > 0:
+            total_sessions = 1
+            total_minutes = duration
+            recent_durations = [duration]
 
         metrics = [
-            (f"{focus_score:.1f}/10", focus_delta),
-            (f"{efficiency}%", eff_delta),
-            (f"{distractions} minor", distraction_note),
-            (energy_text, energy_note)
+            (self._format_minutes(duration), "This session"),
+            (status, "Logged status"),
+            (self._format_minutes(total_minutes), "All sessions"),
+            (str(total_sessions), "For this task")
         ]
         for idx, item in enumerate(self.metric_cards):
             value, delta = metrics[idx]
@@ -471,34 +422,38 @@ class QuickStatsPage(QWidget):
 
         start_time = dt_start.strftime("%I:%M %p").lstrip("0") if dt_start else "--"
         duration_text = f"{duration} mins" if duration else "--"
-        task_type = "Deep Work" if status == "Focus Session" else "Completed"
+        if has_session:
+            task_type = "Deep Work"
+        else:
+            task_type = "Completed" if task and task["is_completed"] else "Task"
         self.detail_rows[0]["right"].setText(start_time)
         self.detail_rows[1]["right"].setText(duration_text)
         self.detail_rows[2]["right"].setText(task_type)
-
-        self.energy_chart.set_data(energy_values)
-        self.trend_start.setText("Start")
+        if recent_durations:
+            max_val = max(recent_durations) if recent_durations else 0
+            if max_val > 0:
+                chart_values = [d / max_val for d in recent_durations]
+            else:
+                chart_values = [0.0 for _ in recent_durations]
+            self.energy_chart.set_data(chart_values)
+            min_d = min(recent_durations)
+            max_d = max_val
+            avg_d = int(round(sum(recent_durations) / len(recent_durations)))
+            self.energy_sub.setText(
+                f"Last {len(recent_durations)} sessions | Min {min_d}m | Avg {avg_d}m | Max {max_d}m"
+            )
+            if len(recent_durations) > 1:
+                self.trend_start.setText("Oldest")
+                self.trend_end.setText("Latest")
+            else:
+                self.trend_start.setText("Session")
+                self.trend_end.setText("")
+        else:
+            self.energy_chart.set_data([])
+            self.energy_sub.setText("No session history yet")
+            self.trend_start.setText("")
+            self.trend_end.setText("")
         self.trend_mid1.setText("")
         self.trend_mid2.setText("")
-        if duration > 0:
-            if duration == 1:
-                mid1 = None
-                mid2 = None
-            elif duration == 2:
-                mid1 = 1
-                mid2 = None
-            else:
-                mid1 = max(1, duration // 3)
-                mid2 = max(mid1 + 1, (duration * 2) // 3)
-                if mid2 >= duration:
-                    mid2 = duration - 1
-                if mid1 >= mid2:
-                    mid1 = max(1, mid2 - 1)
-
-            if mid1:
-                self.trend_mid1.setText(f"{mid1} min")
-            if mid2:
-                self.trend_mid2.setText(f"{mid2} min")
-            self.trend_end.setText(f"{duration} min")
-        else:
-            self.trend_end.setText("End")
+        # Trend labels are handled above based on session history
+        conn.close()

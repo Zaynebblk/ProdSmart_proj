@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen
 from datetime import datetime, timedelta
-import random
-import zlib
 from database.db_manager import get_db_connection
+from resources.theme import get_theme
+from resources.priority import normalize_priority, PRIORITY_LEVELS
 
 
 class FocusRingWidget(QFrame):
@@ -39,54 +39,56 @@ class FocusRingWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            size = min(rect.width(), rect.height()) - 8
+            x = rect.center().x() - size / 2
+            y = rect.center().y() - size / 2
+            ring_rect = QRectF(x, y, size, size)
 
-        rect = QRectF(self.rect())
-        size = min(rect.width(), rect.height()) - 8
-        x = rect.center().x() - size / 2
-        y = rect.center().y() - size / 2
-        ring_rect = QRectF(x, y, size, size)
+            base_color = QColor(self.colors.get("primary_soft_border", "#2f7c98"))
+            arc_color = QColor(self.colors.get("primary", "#11a4d4"))
 
-        base_color = QColor(self.colors.get("primary_soft_border", "#2f7c98"))
-        arc_color = QColor(self.colors.get("primary", "#11a4d4"))
+            pen_bg = QPen(base_color, 6)
+            pen_bg.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_bg)
+            painter.drawArc(ring_rect, 0, 360 * 16)
 
-        pen_bg = QPen(base_color, 6)
-        pen_bg.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen_bg)
-        painter.drawArc(ring_rect, 0, 360 * 16)
+            pen_fg = QPen(arc_color, 6)
+            pen_fg.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_fg)
+            span = int(-self.percent * 360 / 100 * 16)
+            painter.drawArc(ring_rect, 90 * 16, span)
 
-        pen_fg = QPen(arc_color, 6)
-        pen_fg.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen_fg)
-        span = int(-self.percent * 360 / 100 * 16)
-        painter.drawArc(ring_rect, 90 * 16, span)
+            painter.setPen(QColor(self.colors.get("text", "#f1f5f9")))
+            font = painter.font()
+            font.setPointSize(12)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(ring_rect, Qt.AlignmentFlag.AlignCenter, f"{self.percent}%")
 
-        painter.setPen(QColor(self.colors.get("text", "#f1f5f9")))
-        font = painter.font()
-        font.setPointSize(12)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(ring_rect, Qt.AlignmentFlag.AlignCenter, f"{self.percent}%")
-
-        label_rect = QRectF(ring_rect.left(), ring_rect.center().y() + 12, ring_rect.width(), 18)
-        painter.setPen(QColor(self.colors.get("sub", "#94a3b8")))
-        font.setPointSize(8)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, self.label)
+            label_rect = QRectF(ring_rect.left(), ring_rect.center().y() + 12, ring_rect.width(), 18)
+            painter.setPen(QColor(self.colors.get("sub", "#94a3b8")))
+            font.setPointSize(8)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, self.label)
+        finally:
+            painter.end()
 
 
-class TimelineBarsWidget(QFrame):
+class CompletionLadderWidget(QFrame):
     def __init__(self):
         super().__init__()
-        self.values = [60, 80, 95, 100, 90, 45, 70, 92, 88, 55]
+        self.rows = []
         self.colors = {}
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(140)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     def set_data(self, values):
-        if values:
-            self.values = list(values)
+        if values is not None:
+            self.rows = list(values)
         self.update()
 
     def set_theme(self, colors):
@@ -96,43 +98,97 @@ class TimelineBarsWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 90
+            right_pad = 16
+            top_pad = 10
+            bottom_pad = 10
 
-        rect = QRectF(self.rect())
-        left_pad = 8
-        right_pad = 8
-        top_pad = 6
-        bottom_pad = 8
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            label_color = QColor(self.colors.get("text", "#0B132B"))
+            sub_color = QColor(self.colors.get("sub", "#94A3B8"))
 
-        values = self.values or []
-        if not values:
-            return
+            if not self.rows:
+                painter.setPen(sub_color)
+                painter.drawText(QPointF(rect.left() + 10, rect.center().y()), "No tasks yet.")
+                return
 
-        count = len(values)
-        gap = 6
-        bar_w = (chart_rect.width() - gap * (count - 1)) / max(count, 1)
-        primary = QColor(self.colors.get("primary", "#11a4d4"))
+            color_map = {
+                "high": QColor(self.colors.get("bad", "#ef4444")),
+                "medium": QColor(self.colors.get("primary", "#11a4d4")),
+                "low": QColor(self.colors.get("accent2", "#82AFF2")),
+                "too low": QColor(self.colors.get("border", "#94a3b8")),
+            }
 
-        for idx, val in enumerate(values):
-            height = (max(0, min(val, 100)) / 100) * chart_rect.height()
-            x = chart_rect.left() + idx * (bar_w + gap)
-            y = chart_rect.bottom() - height
-            bar_rect = QRectF(x, y, bar_w, height)
-            shade = QColor(primary)
-            if val < 60:
-                shade.setAlpha(80)
-            elif val < 85:
-                shade.setAlpha(160)
-            else:
-                shade.setAlpha(220)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(shade)
-            painter.drawRoundedRect(bar_rect, 3, 3)
+            label_font = painter.font()
+            label_font.setPointSize(9)
+            label_font.setBold(True)
+
+            value_font = painter.font()
+            value_font.setPointSize(10)
+            value_font.setBold(True)
+
+            painter.setFont(value_font)
+            value_texts = []
+            for row in self.rows:
+                completed = int(row.get("completed", 0) or 0)
+                total = int(row.get("total", 0) or 0)
+                value_texts.append(f"{completed}/{total}")
+            value_metrics = painter.fontMetrics()
+            max_value_w = 0
+            for text in value_texts:
+                max_value_w = max(max_value_w, value_metrics.horizontalAdvance(text))
+            value_col_w = max(28, max_value_w + 6)
+            value_gap = 8
+
+            chart_w = rect.width() - left_pad - right_pad - value_col_w - value_gap
+            if chart_w < 20:
+                chart_w = 20
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                chart_w,
+                rect.height() - top_pad - bottom_pad
+            )
+
+            row_gap = 12
+            step_h = 12
+            step_w = 10
+            step_gap = 4
+            max_steps = max(5, int(chart_rect.width() // (step_w + step_gap)))
+
+            for idx, row in enumerate(self.rows):
+                label = row.get("label", "")
+                level = row.get("level", "too low")
+                completed = int(row.get("completed", 0) or 0)
+                total = int(row.get("total", 0) or 0)
+                y = rect.top() + top_pad + idx * (step_h + row_gap)
+
+                painter.setPen(label_color)
+                painter.setFont(label_font)
+                painter.drawText(QPointF(rect.left() + 8, y + step_h), label)
+
+                steps = max(1, min(total, max_steps)) if total > 0 else max_steps
+                done_steps = int(round((completed / total) * steps)) if total > 0 else 0
+
+                for i in range(steps):
+                    x = chart_rect.left() + i * (step_w + step_gap)
+                    step_rect = QRectF(x, y, step_w, step_h)
+                    if i < done_steps:
+                        painter.setBrush(color_map.get(level, sub_color))
+                    else:
+                        painter.setBrush(QColor(self.colors.get("primary_soft_border", "#cbd5e1")))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRoundedRect(step_rect, 3, 3)
+
+                value_text = value_texts[idx] if idx < len(value_texts) else f"{completed}/{total}"
+                value_x = rect.right() - right_pad - value_col_w
+                value_rect = QRectF(value_x, y - 1, value_col_w, step_h + 2)
+                painter.setPen(label_color)
+                painter.setFont(value_font)
+                painter.drawText(value_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value_text)
+        finally:
+            painter.end()
 
 
 class SessionReportPage(QWidget):
@@ -143,6 +199,7 @@ class SessionReportPage(QWidget):
         self.current_theme = "Light"
         self.colors = {}
         self.current_period = "Today"
+        self._delta_values = {"high": 0, "comp": 0, "sess": 0}
         self.setObjectName("ReportPage")
 
         root = QVBoxLayout(self)
@@ -217,7 +274,7 @@ class SessionReportPage(QWidget):
         self.summary_layout.setContentsMargins(0, 0, 0, 0)
         self.summary_layout.setSpacing(12)
         self.summary_cards = []
-        for title in ("Total Focus", "Efficiency", "Tasks"):
+        for title in ("High Priority Focus", "Completion Rate", "Sessions"):
             card = QFrame()
             card.setObjectName("ReportSummaryCard")
             card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -240,7 +297,7 @@ class SessionReportPage(QWidget):
         self.content.addWidget(self.summary_container)
 
         # Focus breakdown
-        self.breakdown_title = QLabel("Focus Breakdown")
+        self.breakdown_title = QLabel("Priority Breakdown")
         self.content.addWidget(self.breakdown_title)
 
         self.breakdown_frame = QFrame()
@@ -271,7 +328,7 @@ class SessionReportPage(QWidget):
         self.content.addWidget(self.breakdown_frame)
 
         # Timeline
-        self.timeline_title = QLabel("Session Timeline")
+        self.timeline_title = QLabel("Task Completion Ladder")
         self.content.addWidget(self.timeline_title)
 
         self.timeline_frame = QFrame()
@@ -279,19 +336,8 @@ class SessionReportPage(QWidget):
         timeline_layout = QVBoxLayout(self.timeline_frame)
         timeline_layout.setContentsMargins(12, 10, 12, 10)
         timeline_layout.setSpacing(8)
-        self.timeline_chart = TimelineBarsWidget()
+        self.timeline_chart = CompletionLadderWidget()
         timeline_layout.addWidget(self.timeline_chart)
-
-        timeline_labels = QHBoxLayout()
-        self.timeline_start = QLabel("0m")
-        self.timeline_mid = QLabel("0m")
-        self.timeline_end = QLabel("0m")
-        timeline_labels.addWidget(self.timeline_start)
-        timeline_labels.addStretch()
-        timeline_labels.addWidget(self.timeline_mid)
-        timeline_labels.addStretch()
-        timeline_labels.addWidget(self.timeline_end)
-        timeline_layout.addLayout(timeline_labels)
         self.content.addWidget(self.timeline_frame)
 
         # Tasks
@@ -316,32 +362,7 @@ class SessionReportPage(QWidget):
 
     def update_theme(self, theme):
         self.current_theme = theme
-        if theme == "Dark":
-            self.colors = {
-                "bg": "#101d22",
-                "card": "#0f1b20",
-                "border": "#1f2a2f",
-                "text": "#f1f5f9",
-                "sub": "#94a3b8",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.18)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.35)",
-                "good": "#34d399",
-                "bad": "#f87171",
-            }
-        else:
-            self.colors = {
-                "bg": "#f6f8f8",
-                "card": "#ffffff",
-                "border": "#e2e8f0",
-                "text": "#0f172a",
-                "sub": "#64748b",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.12)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.25)",
-                "good": "#10b981",
-                "bad": "#ef4444",
-            }
+        self.colors = get_theme(theme)
 
         self.apply_styles()
 
@@ -352,14 +373,14 @@ class SessionReportPage(QWidget):
             f"QFrame#ReportHeader {{ background: {c['bg']}; border-bottom: 1px solid {c['primary_soft_border']}; }}"
         )
         self.back_btn.setStyleSheet(
-            f"QPushButton#ReportBackButton {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 18px; color: {c['text']}; font-weight: 700; }}"
+            f"QPushButton#ReportBackButton {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 18px; color: {c['text']}; font-weight: bold; }}"
         )
         self.header_title.setStyleSheet(
             f"color: {c['text']}; font-size: 16px; font-weight: 800;"
         )
 
         self.date_label.setStyleSheet(
-            f"color: {c['primary']}; font-size: 12px; font-weight: 900; text-transform: uppercase;"
+            f"color: {c['primary']}; font-size: 12px; font-weight: 900;"
         )
         self.time_label.setStyleSheet(
             f"color: {c['sub']}; font-size: 11px; font-weight: 700;"
@@ -367,9 +388,9 @@ class SessionReportPage(QWidget):
 
         self.period_frame.setStyleSheet(
             f"QFrame#ReportPeriod {{ background: {c['primary_soft']}; border: 1px solid {c['primary_soft_border']}; border-radius: 10px; }}"
-            "QPushButton { border: none; padding: 6px 10px; border-radius: 8px; font-size: 10px; font-weight: 800; }"
-            f"QPushButton:checked {{ background: {c['card']}; color: {c['primary']}; }}"
-            f"QPushButton:!checked {{ color: {c['sub']}; }}"
+            "QPushButton { border: none; padding: 6px 10px; border-radius: 8px; font-size: 10px; font-weight: bold; }"
+            f"QPushButton:checked {{ background-color: {c['card']}; color: {c['primary']}; }}"
+            f"QPushButton:unchecked {{ color: {c['sub']}; }}"
         )
 
         for item in self.summary_cards:
@@ -383,7 +404,7 @@ class SessionReportPage(QWidget):
                 f"color: {c['primary']}; font-size: 20px; font-weight: 900;"
             )
             item["delta"].setStyleSheet(
-                f"color: {c['good']}; font-size: 10px; font-weight: 800;"
+                f"color: {c['sub']}; font-size: 10px; font-weight: 800;"
             )
 
         self.breakdown_title.setStyleSheet(
@@ -416,18 +437,35 @@ class SessionReportPage(QWidget):
             f"QFrame#ReportTimeline {{ background: {c['primary_soft']}; border: 1px solid {c['primary_soft_border']}; border-radius: 14px; }}"
         )
         self.timeline_chart.set_theme(c)
-        for lbl in (self.timeline_start, self.timeline_mid, self.timeline_end):
-            lbl.setStyleSheet(
-                f"color: {c['sub']}; font-size: 9px; font-weight: 800;"
-            )
+        # Completion ladder uses in-row labels only
 
         self.tasks_title.setStyleSheet(
             f"color: {c['text']}; font-size: 16px; font-weight: 800;"
         )
 
         self.back_action.setStyleSheet(
-            f"QPushButton#ReportPrimaryButton {{ background: {c['primary']}; color: white; border: none; border-radius: 14px; padding: 10px; font-size: 12px; font-weight: 900; }}"
+            f"QPushButton#ReportPrimaryButton {{ background-color: {c['primary']}; color: white; border: none; border-radius: 14px; padding: 10px; font-size: 12px; font-weight: bold; }}"
         )
+        self._apply_delta_styles()
+
+    def _apply_delta_styles(self):
+        if not hasattr(self, "summary_cards"):
+            return
+        c = self.colors or {}
+        deltas = self._delta_values or {}
+
+        def _style(label, value):
+            if value < 0:
+                color = c.get("bad", "#EF4444")
+            elif value > 0:
+                color = c.get("good", "#22C55E")
+            else:
+                color = c.get("sub", "#94A3B8")
+            label.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: 800;")
+
+        _style(self.summary_cards[0]["delta"], deltas.get("high", 0))
+        _style(self.summary_cards[1]["delta"], deltas.get("comp", 0))
+        _style(self.summary_cards[2]["delta"], deltas.get("sess", 0))
 
     def _parse_dt(self, value):
         if not value:
@@ -445,10 +483,6 @@ class SessionReportPage(QWidget):
 
     def _format_time(self, dt):
         return dt.strftime("%I:%M %p").lstrip("0") if dt else ""
-
-    def _seed_from(self, activity_id, dt_start, duration):
-        raw = f"{activity_id}|{dt_start.isoformat() if dt_start else ''}|{duration}"
-        return zlib.adler32(raw.encode("utf-8"))
 
     def _period_bounds(self):
         today = datetime.now().date()
@@ -475,69 +509,7 @@ class SessionReportPage(QWidget):
             return
         self._refresh_report()
 
-    def _generate_timeline(self, duration, seed):
-        if duration <= 0:
-            return [60, 75, 85, 90, 80, 70, 65, 70]
-        count = 10 if duration <= 60 else 12
-        rnd = random.Random(seed)
-        base = 55 + min(duration, 120) * 0.25
-        trend = rnd.uniform(-10, 10)
-        values = []
-        for idx in range(count):
-            t = idx / max(count - 1, 1)
-            drift = (t - 0.5) * trend * 2
-            noise = rnd.uniform(-12, 12)
-            dip = -8 if (0.35 < t < 0.55 and rnd.random() < 0.5) else 0
-            val = base + drift + noise + dip
-            values.append(int(max(35, min(100, val))))
-        return values
-
-    def _summarize_timeline(self, values):
-        if not values:
-            return {
-                "avg": 0,
-                "min": 0,
-                "max": 0,
-                "variability": 0,
-                "peak_idx": 0,
-                "min_idx": 0,
-                "first_avg": 0,
-                "second_avg": 0
-            }
-        avg = sum(values) / len(values)
-        min_val = min(values)
-        max_val = max(values)
-        peak_idx = values.index(max_val)
-        min_idx = values.index(min_val)
-        mid = max(1, len(values) // 2)
-        first_avg = sum(values[:mid]) / mid
-        second_avg = sum(values[mid:]) / max(len(values) - mid, 1)
-        return {
-            "avg": avg,
-            "min": min_val,
-            "max": max_val,
-            "variability": max_val - min_val,
-            "peak_idx": peak_idx,
-            "min_idx": min_idx,
-            "first_avg": first_avg,
-            "second_avg": second_avg
-        }
-
-    def _calc_efficiency(self, summary):
-        avg = summary["avg"]
-        variability = summary["variability"]
-        score = avg - variability * 0.2 + 10
-        return int(max(50, min(99, score)))
-
-    def _calc_focus_score(self, summary):
-        avg = summary["avg"]
-        return min(9.9, max(3.5, (avg / 100) * 9.5))
-
-    def _calc_deep_pct(self, summary):
-        avg = summary["avg"]
-        variability = summary["variability"]
-        pct = 50 + (avg - 50) * 1.1 - variability * 0.15
-        return int(max(55, min(95, pct)))
+    
 
 
     def load_report(self, activity_id=None):
@@ -545,55 +517,154 @@ class SessionReportPage(QWidget):
 
     def _refresh_report(self):
         start_date, end_date = self._period_bounds()
+        period_days = (end_date - start_date).days + 1
+        prev_end = start_date - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=period_days - 1)
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         conn = get_db_connection()
-        try:
-            sessions_all = conn.execute(
-                "SELECT id, task_id, task_title, started_at, ended_at, duration_min, status "
-                "FROM pomodoro_sessions WHERE started_at >= ? AND started_at <= ?",
-                (start_str, end_str)
-            ).fetchall()
-        except Exception:
-            sessions_all = []
-
-        try:
-            tasks_all = conn.execute(
-                "SELECT id, title, is_completed, completed_at FROM tasks "
-                "WHERE completed_at >= ? AND completed_at <= ?",
-                (start_str, end_str)
-            ).fetchall()
-        except Exception:
-            tasks_all = []
-        try:
-            session_task_ids = {row["task_id"] for row in sessions_all if row["task_id"] is not None}
-            task_ids = {row["id"] for row in tasks_all}
-            missing = list(session_task_ids - task_ids)
-            if missing:
-                placeholders = ",".join(["?"] * len(missing))
-                extra = conn.execute(
-                    f"SELECT id, title, is_completed, completed_at FROM tasks WHERE id IN ({placeholders})",
-                    tuple(missing)
+        def _load_period(period_start, period_end):
+            p_start = datetime.combine(period_start, datetime.min.time())
+            p_end = datetime.combine(period_end, datetime.max.time())
+            p_start_str = p_start.strftime("%Y-%m-%d %H:%M:%S")
+            p_end_str = p_end.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                sessions = conn.execute(
+                    "SELECT id, task_id, task_title, task_priority, started_at, ended_at, duration_min, status "
+                    "FROM pomodoro_sessions WHERE started_at >= ? AND started_at <= ?",
+                    (p_start_str, p_end_str)
                 ).fetchall()
-                tasks_all = list(tasks_all) + list(extra)
-        except Exception:
-            tasks_all = list(tasks_all)
-        finally:
-            conn.close()
+            except Exception:
+                sessions = []
+            try:
+                tasks = conn.execute(
+                    "SELECT id, title, priority, is_completed, completed_at FROM tasks "
+                    "WHERE completed_at >= ? AND completed_at <= ?",
+                    (p_start_str, p_end_str)
+                ).fetchall()
+            except Exception:
+                tasks = []
+            try:
+                session_task_ids = {row["task_id"] for row in sessions if row["task_id"] is not None}
+                task_ids = {row["id"] for row in tasks}
+                missing = list(session_task_ids - task_ids)
+                if missing:
+                    placeholders = ",".join(["?"] * len(missing))
+                    extra = conn.execute(
+                        f"SELECT id, title, priority, is_completed, completed_at FROM tasks WHERE id IN ({placeholders})",
+                        tuple(missing)
+                    ).fetchall()
+                    tasks = list(tasks) + list(extra)
+            except Exception:
+                tasks = list(tasks)
+            return list(sessions), list(tasks)
 
-        sessions_filtered = list(sessions_all)
-        tasks_filtered = list(tasks_all)
+        def _build_metrics(sessions, tasks, period_start, period_end):
+            tasks_by_id = {}
+            for row in tasks:
+                prio = normalize_priority(row["priority"])
+                if prio not in PRIORITY_LEVELS:
+                    prio = None
+                tasks_by_id[row["id"]] = prio
+
+            sessions_filtered = []
+            total_minutes = 0
+            sessions_count = 0
+            priority_minutes = {level: 0 for level in PRIORITY_LEVELS}
+            for row in sessions:
+                status = str(row["status"] or "").strip().lower()
+                if status and status not in ("completed", "stopped"):
+                    continue
+                sessions_filtered.append(row)
+                mins = int(row["duration_min"] or 0)
+                total_minutes += mins
+                sessions_count += 1
+                prio = normalize_priority(row["task_priority"])
+                if prio not in PRIORITY_LEVELS:
+                    prio = tasks_by_id.get(row["task_id"])
+                if prio not in PRIORITY_LEVELS:
+                    prio = "too low"
+                priority_minutes[prio] += mins
+
+            completed_map = {}
+            for row in tasks:
+                if not row["is_completed"]:
+                    continue
+                dt_completed = self._parse_dt(row["completed_at"])
+                if not dt_completed:
+                    continue
+                if period_start <= dt_completed.date() <= period_end:
+                    completed_map[row["id"]] = row
+
+            minutes_by_task = {}
+            for row in sessions_filtered:
+                t_id = row["task_id"]
+                t_title = row["task_title"] or "Focus Session"
+                mins = int(row["duration_min"] or 0)
+                key = (t_id, t_title)
+                minutes_by_task[key] = minutes_by_task.get(key, 0) + mins
+
+            tasks_list = []
+            for (t_id, t_title), mins in minutes_by_task.items():
+                is_done = t_id in completed_map if t_id is not None else False
+                completed_at = completed_map[t_id]["completed_at"] if is_done else None
+                tasks_list.append({
+                    "title": t_title,
+                    "minutes": mins,
+                    "done": is_done,
+                    "completed_at": completed_at,
+                    "priority": tasks_by_id.get(t_id)
+                })
+
+            for row in tasks:
+                key = (row["id"], row["title"])
+                if key not in minutes_by_task:
+                    is_done = row["id"] in completed_map
+                    completed_at = completed_map[row["id"]]["completed_at"] if is_done else None
+                    tasks_list.append({
+                        "title": row["title"],
+                        "minutes": 0,
+                        "done": is_done,
+                        "completed_at": completed_at,
+                        "priority": tasks_by_id.get(row["id"])
+                    })
+
+            total_tasks = len(tasks_list)
+            completed_tasks = sum(1 for item in tasks_list if item["done"])
+            completion_rate = int(round((completed_tasks / total_tasks) * 100)) if total_tasks else 0
+
+            return {
+                "sessions": sessions_filtered,
+                "tasks_list": tasks_list,
+                "total_minutes": total_minutes,
+                "sessions_count": sessions_count,
+                "priority_minutes": priority_minutes,
+                "completion_rate": completion_rate,
+                "completed_tasks": completed_tasks,
+                "total_tasks": total_tasks
+            }
+
+        sessions_all, tasks_all = _load_period(start_date, end_date)
+        sessions_prev, tasks_prev = _load_period(prev_start, prev_end)
+        current_data = _build_metrics(sessions_all, tasks_all, start_date, end_date)
+        prev_data = _build_metrics(sessions_prev, tasks_prev, prev_start, prev_end)
+        conn.close()
+
+        sessions_filtered = current_data["sessions"]
+        tasks_list = current_data["tasks_list"]
+        total_minutes = current_data["total_minutes"]
+        sessions_count = current_data["sessions_count"]
+        priority_minutes = current_data["priority_minutes"]
+        completion_rate = current_data["completion_rate"]
 
         dt_start = None
         dt_end = None
-        total_minutes = 0
         for row in sessions_filtered:
             dt = self._parse_dt(row["started_at"])
             mins = int(row["duration_min"] or 0)
-            total_minutes += mins
             if dt and (dt_start is None or dt < dt_start):
                 dt_start = dt
             if dt:
@@ -623,47 +694,63 @@ class SessionReportPage(QWidget):
             period_label = "Today"
         self.header_title.setText(f"Session Report - {period_label}")
 
-        seed = self._seed_from(f"{self.current_period}:{date_text}", dt_start or datetime.now(), total_minutes)
-        timeline_values = self._generate_timeline(total_minutes, seed)
-        summary = self._summarize_timeline(timeline_values)
+        high_minutes = priority_minutes.get("high", 0)
+        other_minutes = max(total_minutes - high_minutes, 0)
+        high_pct = int(round((high_minutes / total_minutes) * 100)) if total_minutes else 0
+
+        def _delta_pct(current, previous):
+            if previous == 0:
+                return 0 if current == 0 else 100
+            return int(round(((current - previous) / previous) * 100))
+
+        prev_high = prev_data["priority_minutes"].get("high", 0)
+        prev_completion = prev_data["completion_rate"]
+        prev_sessions = prev_data["sessions_count"]
+
+        high_delta = _delta_pct(high_minutes, prev_high)
+        comp_delta = completion_rate - prev_completion
+        sess_delta = _delta_pct(sessions_count, prev_sessions)
+
+        high_prefix = "+" if high_delta >= 0 else ""
+        comp_prefix = "+" if comp_delta >= 0 else ""
+        sess_prefix = "+" if sess_delta >= 0 else ""
+
+        self.summary_cards[0]["value"].setText(f"{high_minutes}m")
+        self.summary_cards[1]["value"].setText(f"{completion_rate}%")
+        self.summary_cards[2]["value"].setText(str(sessions_count))
+
+        self.summary_cards[0]["delta"].setText(f"{high_prefix}{high_delta}%")
+        self.summary_cards[1]["delta"].setText(f"{comp_prefix}{comp_delta}%")
+        self.summary_cards[2]["delta"].setText(f"{sess_prefix}{sess_delta}%")
+        self._delta_values = {"high": high_delta, "comp": comp_delta, "sess": sess_delta}
+        self._apply_delta_styles()
+
+        self.ring.set_data(high_pct, "High")
+        self.deep_row.setText("High Priority")
+        self.deep_value.setText(f"{high_minutes} min")
+        self.minor_row.setText("Other Priority")
+        self.minor_value.setText(f"{other_minutes} min")
         if total_minutes > 0:
-            efficiency = self._calc_efficiency(summary)
-            deep_pct = self._calc_deep_pct(summary)
+            self.breakdown_note.setText(f"High priority focus accounts for {high_pct}% of total time.")
         else:
-            efficiency = 0
-            deep_pct = 0
-        deep_minutes = int(round(total_minutes * deep_pct / 100)) if total_minutes else 0
-        minor_minutes = max(total_minutes - deep_minutes, 0)
+            self.breakdown_note.setText("No focus data available for this period.")
 
-        tasks_list = []
-        minutes_by_task = {}
-        for row in sessions_filtered:
-            t_id = row["task_id"]
-            t_title = row["task_title"] or "Focus Session"
-            mins = int(row["duration_min"] or 0)
-            key = (t_id, t_title)
-            minutes_by_task[key] = minutes_by_task.get(key, 0) + mins
+        def _norm_prio(value):
+            pr = normalize_priority(value)
+            return pr if pr in PRIORITY_LEVELS else "too low"
 
-        completed_map = {row["id"]: row for row in tasks_filtered if row["is_completed"]}
-        for (t_id, t_title), mins in minutes_by_task.items():
-            is_done = t_id in completed_map if t_id is not None else False
-            completed_at = completed_map[t_id]["completed_at"] if is_done else None
-            tasks_list.append({
-                "title": t_title,
-                "minutes": mins,
-                "done": is_done,
-                "completed_at": completed_at
+        ladder_rows = []
+        label_map = [("high", "High"), ("medium", "Medium"), ("low", "Low"), ("too low", "Too Low")]
+        for level, label in label_map:
+            total = sum(1 for item in tasks_list if _norm_prio(item.get("priority")) == level)
+            completed = sum(1 for item in tasks_list if _norm_prio(item.get("priority")) == level and item.get("done"))
+            ladder_rows.append({
+                "label": label,
+                "level": level,
+                "completed": completed,
+                "total": total
             })
-
-        for row in tasks_filtered:
-            key = (row["id"], row["title"])
-            if key not in minutes_by_task:
-                tasks_list.append({
-                    "title": row["title"],
-                    "minutes": 0,
-                    "done": True,
-                    "completed_at": row["completed_at"]
-                })
+        self.timeline_chart.set_data(ladder_rows)
 
         def _task_sort_key(item):
             done_rank = 1 if item.get("done") else 0
@@ -673,43 +760,6 @@ class SessionReportPage(QWidget):
 
         if tasks_list:
             tasks_list.sort(key=_task_sort_key, reverse=True)
-
-        total_tasks_count = len(tasks_list)
-        self.summary_cards[0]["value"].setText(f"{total_minutes}m")
-        self.summary_cards[1]["value"].setText(f"{efficiency}%")
-        self.summary_cards[2]["value"].setText(str(total_tasks_count))
-
-        focus_baseline = 45
-        focus_delta = int(round(((total_minutes - focus_baseline) / max(focus_baseline, 1)) * 100)) if total_minutes else 0
-        focus_prefix = "+" if focus_delta >= 0 else ""
-        self.summary_cards[0]["delta"].setText(f"{focus_prefix}{focus_delta}%")
-
-        eff_baseline = 75
-        eff_delta = int(round(((efficiency - eff_baseline) / max(eff_baseline, 1)) * 100)) if efficiency else 0
-        eff_prefix = "+" if eff_delta >= 0 else ""
-        self.summary_cards[1]["delta"].setText(f"{eff_prefix}{eff_delta}%")
-
-        tasks_baseline = 3
-        tasks_delta = int(round(((total_tasks_count - tasks_baseline) / max(tasks_baseline, 1)) * 100))
-        tasks_prefix = "+" if tasks_delta >= 0 else ""
-        self.summary_cards[2]["delta"].setText(f"{tasks_prefix}{tasks_delta}%")
-
-        self.ring.set_data(deep_pct, "Deep")
-        self.deep_row.setText("Deep Focus")
-        self.deep_value.setText(f"{deep_minutes} min")
-        self.minor_row.setText("Minor Distractions")
-        self.minor_value.setText(f"{minor_minutes} min")
-        if total_minutes > 0:
-            peak_min = int(round((summary["peak_idx"] / max(len(timeline_values) - 1, 1)) * total_minutes))
-            self.breakdown_note.setText(f"Peak focus around {peak_min} min into the session.")
-        else:
-            self.breakdown_note.setText("No timing data available for this session.")
-
-        self.timeline_chart.set_data(timeline_values)
-        self.timeline_start.setText("0m")
-        mid = max(1, total_minutes // 2)
-        self.timeline_mid.setText(f"{mid}m")
-        self.timeline_end.setText(f"{total_minutes}m")
 
         while self.tasks_layout.count():
             item = self.tasks_layout.takeAt(0)
@@ -739,7 +789,7 @@ class SessionReportPage(QWidget):
             status = QLabel("DONE" if task_item["done"] else "PARTIAL")
             status_color = "#34d399" if task_item["done"] else self.colors["primary"]
             status.setStyleSheet(
-                f"color: {status_color}; background: rgba(17, 164, 212, 0.12); font-size: 9px; font-weight: 800; padding: 4px 8px; border-radius: 10px;"
+                f"color: {status_color}; background: rgba(17, 164, 212, 31); font-size: 9px; font-weight: 800; padding: 4px 8px; border-radius: 10px;"
             )
 
             row_layout.addLayout(text_col)

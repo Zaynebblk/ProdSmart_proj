@@ -4,12 +4,21 @@ import subprocess
 from datetime import datetime
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QFrame, QSpinBox, QApplication, QSystemTrayIcon,
-                             QToolButton, QProgressBar, QScrollArea, QMessageBox, QSizePolicy, QGridLayout)
+                             QToolButton, QProgressBar, QScrollArea, QMessageBox, QSizePolicy, QGridLayout, QStyle)
 from PyQt6.QtCore import Qt, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPainterPath, QPen, QColor, QPixmap, QDesktopServices
 from PyQt6.QtCore import QUrl
 from database.db_manager import get_db_connection
 from pages.settings_page import Toggle
+from resources.theme import get_theme, FONT_FAMILY
+try:
+    import PyQt6.sip as sip
+except Exception:
+    try:
+        import sip  # type: ignore
+    except Exception:
+        sip = None
+from resources.priority import normalize_priority, priority_session_label
 
 class NoWheelSpinBox(QSpinBox):
     def wheelEvent(self, event):
@@ -54,9 +63,11 @@ class PomodoroPage(QWidget):
         # Task-linked session state
         self.current_task_id = None
         self.current_task_title = None
+        self.current_task_priority = None
         self.session_started_at = None
         self.session_task_id = None
         self.session_task_title = None
+        self.session_task_priority = None
         self.session_duration_min = None
         self.plan_enabled = True
         self.plan_index = 0
@@ -77,6 +88,32 @@ class PomodoroPage(QWidget):
         """S'active quand on clique sur l'onglet"""
         self.apply_theme()
         super().showEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_responsive_sizes()
+
+    def _prune_dead_widgets(self):
+        def _alive(widget):
+            if widget is None:
+                return False
+            if sip:
+                try:
+                    if sip.isdeleted(widget):
+                        return False
+                except Exception:
+                    pass
+            try:
+                widget.objectName()
+            except RuntimeError:
+                return False
+            return True
+
+        self.spinboxes = [w for w in self.spinboxes if _alive(w)]
+        self.inputs_bg = [w for w in self.inputs_bg if _alive(w)]
+        self.labels_main = [w for w in self.labels_main if _alive(w)]
+        self.labels_sub = [w for w in self.labels_sub if _alive(w)]
+        self.cards = [w for w in self.cards if _alive(w)]
 
     def setup_ui(self):
         root_layout = QVBoxLayout(self)
@@ -139,6 +176,12 @@ class PomodoroPage(QWidget):
         self.current_task_title_label.setObjectName("CurrentTaskTitle")
         self.current_task_title_label.setWordWrap(True)
         current_layout.addWidget(self.current_task_title_label)
+
+        self.current_task_meta = QLabel("Session Type: -")
+        self.current_task_meta.setObjectName("CurrentTaskMeta")
+        self.current_task_meta.setWordWrap(True)
+        self.labels_sub.append(self.current_task_meta)
+        current_layout.addWidget(self.current_task_meta)
 
         progress_row = QHBoxLayout()
         self.session_progress_title = QLabel("Session Progress")
@@ -203,14 +246,14 @@ class PomodoroPage(QWidget):
         self.left_vbox.addWidget(self.current_task_card)
         self.left_vbox.addSpacing(20)
 
-        self.badge = QLabel("✨ FOCUS TIME")
+        self.badge = QLabel("FOCUS TIME")
         self.badge.setObjectName("PomodoroBadge")
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge.setFixedSize(130, 32)
         self.left_vbox.addWidget(self.badge, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.timer_label = QLabel("25:00")
-        self.timer_label.setFixedSize(320, 320)
+        self.timer_label.setMinimumSize(220, 220)
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.left_vbox.addWidget(self.timer_label, alignment=Qt.AlignmentFlag.AlignCenter)
         
@@ -256,25 +299,34 @@ class PomodoroPage(QWidget):
         self.btn_add_two.clicked.connect(lambda: self.add_break_minutes(2))
 
         self.tips_frame.setVisible(False)
-        self.left_vbox.addWidget(self.tips_frame, alignment=Qt.AlignmentFlag.AlignCenter)
 
         btn_layout = QHBoxLayout()
-        self.btn_start = QPushButton("▶ Start Session")
+        btn_layout.setSpacing(12)
+        self.btn_start = QPushButton("Start Session")
         self.btn_start.setFixedSize(160, 50)
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_start.clicked.connect(self.toggle_timer)
+
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setFixedSize(110, 50)
+        self.btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop.clicked.connect(self.stop_timer)
+        self.btn_stop.setVisible(False)
         
-        self.btn_reset = QPushButton("↺ Reset")
-        self.btn_reset.setFixedSize(100, 50)
+        self.btn_reset = QPushButton("Reset")
+        self.btn_reset.setFixedSize(110, 50)
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_reset.clicked.connect(self.reset_timer)
         self.btn_reset_ref = self.btn_reset
         
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_start)
+        btn_layout.addWidget(self.btn_stop)
         btn_layout.addWidget(self.btn_reset)
         btn_layout.addStretch()
         self.left_vbox.addLayout(btn_layout)
+        self._apply_control_icons()
+        self.left_vbox.addWidget(self.tips_frame, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.left_vbox.addSpacing(30)
         self.separator = QFrame()
@@ -294,7 +346,7 @@ class PomodoroPage(QWidget):
         self.left_vbox.addStretch()
 
         # === DROITE ===
-        self.settings_card = self.create_card("⚙ Settings")
+        self.settings_card = self.create_card("Settings")
         self.focus_input = self.add_styled_setting(self.settings_card, "Focus Duration", 25)
         self.short_input = self.add_styled_setting(self.settings_card, "Short Break", 5)
         self.long_input = self.add_styled_setting(self.settings_card, "Long Break", 15)
@@ -320,7 +372,7 @@ class PomodoroPage(QWidget):
         self.plan_scroll.setWidget(self.plan_container)
         self.plan_card.layout().addWidget(self.plan_scroll)
 
-        self.cycle_card = self.create_card("📊 Current Cycle")
+        self.cycle_card = self.create_card("Current Cycle")
         self.total_stat = self.add_stat_line(self.cycle_card, "Total Time", "130m", True)
 
         self.settings_stack = QWidget()
@@ -331,7 +383,7 @@ class PomodoroPage(QWidget):
         settings_layout.addWidget(self.plan_card)
         settings_layout.addWidget(self.cycle_card)
 
-        insert_idx = self.left_vbox.indexOf(self.timer_label) + 1
+        insert_idx = self.left_vbox.indexOf(self.tips_frame) + 1
         self.left_vbox.insertWidget(insert_idx, self.settings_stack)
 
         self.main_layout.addWidget(self.left_container, stretch=1)
@@ -383,6 +435,7 @@ class PomodoroPage(QWidget):
         return theme, auto_start, enable_notifications, sound_effects
 
     def apply_theme(self):
+        self._prune_dead_widgets()
         raw_theme, auto_start, enable_notifications, sound_effects = self.load_settings_data()
         self.auto_start = bool(auto_start)
         self.enable_notifications = bool(enable_notifications)
@@ -393,21 +446,26 @@ class PomodoroPage(QWidget):
         
         print(f"🎨 Application du thème : {'DARK' if is_dark else 'LIGHT'}")
 
-        if is_dark:
-            c = {
-                "bg": "#121212", "card": "#1e1e1e", "border": "#333333",
-                "text_main": "#ffffff", "text_sub": "#a0a0a0",
-                "input_bg": "#2d2d2d", "badge_bg": "#172554", "badge_text": "#93c5fd"
-            }
-        else:
-            c = {
-                "bg": "#f8fafc", "card": "#ffffff", "border": "#edf2f7",
-                "text_main": "#1e293b", "text_sub": "#64748b",
-                "input_bg": "#f1f5f9", "badge_bg": "#eff6ff", "badge_text": "#2563eb"
-            }
+        base = get_theme("Dark" if is_dark else "Light")
+        c = {
+            "bg": base["bg"],
+            "card": base["card"],
+            "border": base["border"],
+            "text_main": base["text"],
+            "text_sub": base["sub"],
+            "input_bg": base["input_bg"],
+            "badge_bg": base["accent_soft"],
+            "badge_text": base["accent"],
+            "accent": base["accent"],
+            "accent2": base["accent2"],
+            "good": base["good"],
+            "bad": base["bad"],
+            "deep": base["deep"],
+            "card_alt": base["card_alt"],
+        }
         self._theme_colors = c
 
-        self.setStyleSheet(f"background-color: {c['bg']};")
+        self.setStyleSheet(f"background-color: {c['bg']}; font-family: '{FONT_FAMILY}', 'Segoe UI';")
 
         for card in self.cards:
             card.setStyleSheet(f"background-color: {c['card']}; border-radius: 30px; border: 1px solid {c['border']};")
@@ -419,7 +477,10 @@ class PomodoroPage(QWidget):
             lbl.setStyleSheet(lbl.styleSheet() + f" color: {c['text_sub']}; border: none; background: transparent;")
 
         for sb in self.spinboxes:
-            is_plan = sb.property("planSpin") is True
+            try:
+                is_plan = sb.property("planSpin") is True
+            except RuntimeError:
+                continue
             if is_plan:
                 sb.setStyleSheet(
                     f"QSpinBox {{ background: transparent; color: {c['text_main']}; border: none; "
@@ -453,11 +514,11 @@ class PomodoroPage(QWidget):
 
         if self.plan_rows:
             if self._is_dark:
-                row_bg = "#161d24"
-                row_border = "#2b3440"
+                row_bg = c["card_alt"]
+                row_border = c["border"]
             else:
-                row_bg = "#f8fafc"
-                row_border = "#e2e8f0"
+                row_bg = c["card"]
+                row_border = c["border"]
             for row in self.plan_rows:
                 row.setStyleSheet(
                     f"QFrame#PlanRow {{ background-color: {row_bg}; border: 1px solid {row_border}; border-radius: 16px; }}"
@@ -465,9 +526,17 @@ class PomodoroPage(QWidget):
 
         self.badge.setStyleSheet(f"background-color: {c['badge_bg']}; color: {c['badge_text']}; border-radius: 16px; font-weight: bold; font-size: 11px;")
         
-        self.timer_label.setStyleSheet(f"font-size: 85px; font-weight: 900; color: {c['text_main']}; background-color: {c['bg']}; border: 12px solid #3b82f6; border-radius: 160px;")
+        self.timer_label.setStyleSheet(f"font-size: 85px; font-weight: 900; color: {c['text_main']}; background-color: {c['bg']}; border: 12px solid {c['accent']}; border-radius: 160px;")
         
         self.btn_reset_ref.setStyleSheet(f"background-color: {c['input_bg']}; color: {c['text_main']}; border-radius: 12px; font-weight: bold; border: none;")
+        if hasattr(self, "btn_stop"):
+            stop = c.get("bad", "#ef4444")
+            stop_hover = c.get("input_bg", "#1f2937")
+            self.btn_stop.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; color: {stop}; border: 1px solid {stop}; "
+                f"border-radius: 12px; font-weight: bold; }} "
+                f"QPushButton:hover {{ background-color: {stop_hover}; }}"
+            )
         
         sep_style = f"background-color: {c['border']}; border: none;"
         self.separator.setStyleSheet(sep_style)
@@ -477,36 +546,55 @@ class PomodoroPage(QWidget):
         self._style_current_task_card()
         self._sync_focus_mode_toggle()
         self._update_session_progress()
+        self._apply_responsive_sizes()
+        self._apply_control_icons()
+
+    def _apply_control_icons(self):
+        style = QApplication.style() if QApplication.instance() else None
+        if style is None:
+            return
+        self._icon_play = style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        self._icon_pause = style.standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        self._icon_stop = style.standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        self._icon_reset = style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+
+        if hasattr(self, "btn_start"):
+            self.btn_start.setIcon(self._icon_play)
+            self.btn_start.setIconSize(QSize(16, 16))
+        if hasattr(self, "btn_stop"):
+            self.btn_stop.setIcon(self._icon_stop)
+            self.btn_stop.setIconSize(QSize(16, 16))
+        if hasattr(self, "btn_reset_ref"):
+            self.btn_reset_ref.setIcon(self._icon_reset)
+            self.btn_reset_ref.setIconSize(QSize(16, 16))
+        self._set_start_button_icon(self.timer.isActive())
+
+    def _set_start_button_icon(self, is_running):
+        if not hasattr(self, "btn_start"):
+            return
+        if is_running:
+            icon = getattr(self, "_icon_pause", None)
+        else:
+            icon = getattr(self, "_icon_play", None)
+        if icon:
+            self.btn_start.setIcon(icon)
 
     def _style_current_task_card(self):
         if not hasattr(self, "current_task_card"):
             return
-        if self._is_dark:
-            card_bg = "#0b1a24"
-            card_border = "#123246"
-            accent = "#06b6d4"
-            text_main = "#e2e8f0"
-            text_sub = "#94a3b8"
-            progress_bg = "#1f2937"
-            progress_chunk = "#06b6d4"
-            focus_bg = "#0f2533"
-            focus_border = "#1b3a4b"
-            toggle_off = "#1f2937"
-            toggle_on = "#0ea5e9"
-            toggle_thumb = "#e2e8f0"
-        else:
-            card_bg = "#f8fafc"
-            card_border = "#e2e8f0"
-            accent = "#0ea5e9"
-            text_main = "#0f172a"
-            text_sub = "#64748b"
-            progress_bg = "#e2e8f0"
-            progress_chunk = "#0ea5e9"
-            focus_bg = "#ffffff"
-            focus_border = "#e2e8f0"
-            toggle_off = "#cbd5e1"
-            toggle_on = "#38bdf8"
-            toggle_thumb = "#ffffff"
+        colors = self._theme_colors or {}
+        card_bg = colors.get("card_alt", "#0f2238" if self._is_dark else "#ffffff")
+        card_border = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        accent = colors.get("accent2", colors.get("accent", "#82AFF2"))
+        text_main = colors.get("text_main", "#e2e8f0" if self._is_dark else "#113356")
+        text_sub = colors.get("text_sub", "#94a3b8" if self._is_dark else "#47617C")
+        progress_bg = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        progress_chunk = colors.get("accent", "#82AFF2" if self._is_dark else "#3078CD")
+        focus_bg = colors.get("card", "#0f2238" if self._is_dark else "#ffffff")
+        focus_border = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        toggle_off = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        toggle_on = colors.get("accent", "#82AFF2" if self._is_dark else "#3078CD")
+        toggle_thumb = colors.get("text_main", "#e2e8f0" if self._is_dark else "#ffffff")
 
         self._current_task_border_color = card_border
         self._current_task_style_base = (
@@ -729,7 +817,7 @@ class PomodoroPage(QWidget):
         v_layout.setContentsMargins(0, 0, 0, 0); v_layout.setSpacing(0)
 
         btn_up = QPushButton("▲"); btn_down = QPushButton("▼")
-        btn_style = "QPushButton { background: transparent; border: none; color: #64748b; font-weight: bold; } QPushButton:hover { color: #3b82f6; }"
+        btn_style = "QPushButton { background-color: transparent; border: none; color: #47617C; font-weight: bold; } QPushButton:hover { color: #3078CD; }"
         btn_up.setStyleSheet(btn_style); btn_down.setStyleSheet(btn_style)
         btn_up.setCursor(Qt.CursorShape.PointingHandCursor); btn_down.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -772,7 +860,7 @@ class PomodoroPage(QWidget):
 
         btn_up = QPushButton("▲")
         btn_down = QPushButton("▼")
-        btn_style = "QPushButton { background: transparent; border: none; color: #64748b; font-weight: bold; } QPushButton:hover { color: #3b82f6; }"
+        btn_style = "QPushButton { background-color: transparent; border: none; color: #47617C; font-weight: bold; } QPushButton:hover { color: #3078CD; }"
         btn_up.setStyleSheet(btn_style)
         btn_down.setStyleSheet(btn_style)
         btn_up.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -791,15 +879,10 @@ class PomodoroPage(QWidget):
     def _style_plan_badge(self, badge):
         if badge is None:
             return
-        is_dark = self._is_dark
-        if is_dark:
-            badge_bg = "#0f2433"
-            badge_border = "#1e3f52"
-            badge_text = "#93c5fd"
-        else:
-            badge_bg = "#e0f2fe"
-            badge_border = "#bae6fd"
-            badge_text = "#1d4ed8"
+        colors = self._theme_colors or {}
+        badge_bg = colors.get("accent_soft", "#e0f2fe")
+        badge_border = colors.get("border", "#BAD2E0")
+        badge_text = colors.get("accent", "#3078CD")
         try:
             badge.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             badge.setStyleSheet(
@@ -812,27 +895,16 @@ class PomodoroPage(QWidget):
     def _style_plan_chip(self, chip):
         if chip is None:
             return
-        is_dark = self._is_dark
-        if is_dark:
-            focus_bg = "#0f1f2a"
-            focus_border = "#1f3b52"
-            focus_text = "#7dd3fc"
-            break_bg = "#1b1b24"
-            break_border = "#2e2f3a"
-            break_text = "#cbd5f5"
-            long_bg = "#2a1b1b"
-            long_border = "#4a2b2b"
-            long_text = "#fecaca"
-        else:
-            focus_bg = "#e0f2fe"
-            focus_border = "#bae6fd"
-            focus_text = "#0369a1"
-            break_bg = "#eef2ff"
-            break_border = "#c7d2fe"
-            break_text = "#3730a3"
-            long_bg = "#fee2e2"
-            long_border = "#fecaca"
-            long_text = "#991b1b"
+        colors = self._theme_colors or {}
+        focus_bg = colors.get("accent_soft", "#e0f2fe")
+        focus_border = colors.get("border", "#BAD2E0")
+        focus_text = colors.get("accent", "#3078CD")
+        break_bg = colors.get("card_alt", "#EEF5FA")
+        break_border = colors.get("border", "#BAD2E0")
+        break_text = colors.get("accent2", "#82AFF2")
+        long_bg = colors.get("deep", "#25456B")
+        long_border = colors.get("border", "#BAD2E0")
+        long_text = colors.get("text_main", "#F8F6F2")
         name = chip.objectName()
         if name == "PlanChipFocus":
             bg, border, text = focus_bg, focus_border, focus_text
@@ -1155,12 +1227,22 @@ class PomodoroPage(QWidget):
             self.timer.stop()
             self._update_start_button(resume=True)
             if not self._should_disable_start():
-                self.btn_start.setStyleSheet("background-color: #10b981; color: white; border-radius: 12px; font-weight: bold; border: none;")
+                good = (self._theme_colors or {}).get("good", "#10b981")
+                self.btn_start.setStyleSheet(f"background-color: {good}; color: white; border-radius: 12px; font-weight: bold; border: none;")
         else:
             if self._should_disable_start():
                 self._show_task_required()
                 return
             self._start_timer()
+
+    def stop_timer(self):
+        if self.phase != "focus":
+            return
+        if self.session_started_at is None:
+            return
+        self.timer.stop()
+        self._log_session(status="stopped")
+        self._set_phase("focus", reset_time=True, notify=False)
 
     def update_timer(self):
         if self.time_left > 0:
@@ -1206,7 +1288,8 @@ class PomodoroPage(QWidget):
             else:
                 self._update_start_button(resume=False)
                 if not self._should_disable_start():
-                    self.btn_start.setStyleSheet("background-color: #3b82f6; color: white; border-radius: 12px; font-weight: bold; border: none;")
+                    accent = (self._theme_colors or {}).get("accent", "#3078CD")
+                    self.btn_start.setStyleSheet(f"background-color: {accent}; color: white; border-radius: 12px; font-weight: bold; border: none;")
 
     def reset_timer(self):
         if self.session_started_at is not None and self.phase == "focus":
@@ -1233,19 +1316,30 @@ class PomodoroPage(QWidget):
         self._rebuild_plan_inputs()
         self.current_task_id = None
         self.current_task_title = None
+        self.current_task_priority = None
         if hasattr(self, "current_task_title_label"):
             self.current_task_title_label.setText("No Task Selected")
+        if hasattr(self, "current_task_meta"):
+            self.current_task_meta.setText("Session Type: -")
         self._set_phase("focus", reset_time=True, notify=False)
         self._update_start_button(resume=False)
         if not self._should_disable_start():
-            self.btn_start.setStyleSheet("background-color: #3b82f6; color: white; border-radius: 12px; font-weight: bold; border: none;")
+            accent = (self._theme_colors or {}).get("accent", "#3078CD")
+            self.btn_start.setStyleSheet(f"background-color: {accent}; color: white; border-radius: 12px; font-weight: bold; border: none;")
 
-    def set_task(self, task_id, title):
+    def set_task(self, task_id, title, priority=None):
         self.current_task_id = task_id
         self.current_task_title = title
+        self.current_task_priority = normalize_priority(priority)
         safe_title = title.strip() if title else "No Task Selected"
         if hasattr(self, "current_task_title_label"):
             self.current_task_title_label.setText(safe_title)
+        if hasattr(self, "current_task_meta"):
+            if self.current_task_priority:
+                session_label = priority_session_label(self.current_task_priority)
+                self.current_task_meta.setText(f"Session Type: {session_label}")
+            else:
+                self.current_task_meta.setText("Session Type: -")
         if not self.timer.isActive():
             self._update_start_button(resume=False)
 
@@ -1330,33 +1424,48 @@ class PomodoroPage(QWidget):
         self.next_label.setText(f"Next Up: {self._phase_label(next_phase)} ({mins} min)")
 
     def _update_phase_badge(self):
+        colors = self._theme_colors or {}
         if self.phase == "focus":
-            self.badge.setText("✨ FOCUS TIME")
-            bg = "#1d4ed8" if self._is_dark else "#dbeafe"
-            fg = "#e2e8f0" if self._is_dark else "#1d4ed8"
+            self.badge.setText("FOCUS TIME")
+            bg = colors.get("badge_bg", colors.get("accent_soft", "#dbeafe"))
+            fg = colors.get("badge_text", colors.get("accent", "#3078CD"))
         elif self.phase == "short_break":
-            self.badge.setText("☕ SHORT BREAK")
-            bg = "#0f766e" if self._is_dark else "#dcfce7"
-            fg = "#ccfbf1" if self._is_dark else "#166534"
+            self.badge.setText("SHORT BREAK")
+            bg = colors.get("card_alt", "#1b2f4d")
+            fg = colors.get("accent2", "#82AFF2")
         else:
-            self.badge.setText("🧘 LONG BREAK")
-            bg = "#7c3aed" if self._is_dark else "#ede9fe"
-            fg = "#ede9fe" if self._is_dark else "#6d28d9"
+            self.badge.setText("LONG BREAK")
+            bg = colors.get("deep", "#25456B")
+            fg = colors.get("text_main", "#F8F6F2")
         self.badge.setStyleSheet(f"background-color: {bg}; color: {fg}; border-radius: 16px; font-weight: bold; font-size: 11px;")
 
     def _update_start_button(self, resume=False):
+        colors = self._theme_colors or {}
         if self._should_disable_start():
             self.btn_start.setEnabled(False)
             self.btn_start.setText("Select Task")
-            self.btn_start.setStyleSheet("background-color: #334155; color: #94a3b8; border-radius: 12px; font-weight: bold; border: none;")
+            disabled_bg = colors.get("border", "#334155")
+            disabled_text = colors.get("text_sub", "#94a3b8")
+            self.btn_start.setStyleSheet(f"background-color: {disabled_bg}; color: {disabled_text}; border-radius: 12px; font-weight: bold; border: none;")
+            self._set_start_button_icon(False)
+            self._update_stop_button_visibility()
             return
         self.btn_start.setEnabled(True)
         phase_label = self._phase_label(self.phase)
         if resume:
-            self.btn_start.setText(f"▶ Resume {phase_label}")
+            self.btn_start.setText(f"Resume {phase_label}")
         else:
-            self.btn_start.setText(f"▶ Start {phase_label}")
-            self.btn_start.setStyleSheet("background-color: #3b82f6; color: white; border-radius: 12px; font-weight: bold; border: none;")
+            self.btn_start.setText(f"Start {phase_label}")
+            accent = colors.get("accent", "#3078CD")
+            self.btn_start.setStyleSheet(f"background-color: {accent}; color: white; border-radius: 12px; font-weight: bold; border: none;")
+        self._set_start_button_icon(False)
+        self._update_stop_button_visibility()
+
+    def _update_stop_button_visibility(self):
+        if not hasattr(self, "btn_stop"):
+            return
+        show = self.phase == "focus" and self.session_started_at is not None
+        self.btn_stop.setVisible(bool(show))
 
     def _set_phase(self, phase, reset_time=True, notify=False):
         self.phase = phase
@@ -1368,6 +1477,7 @@ class PomodoroPage(QWidget):
             self.session_started_at = None
             self.session_task_id = None
             self.session_task_title = None
+            self.session_task_priority = None
             self.session_duration_min = None
         self._update_phase_badge()
         self._update_next_label()
@@ -1382,13 +1492,17 @@ class PomodoroPage(QWidget):
             self._show_task_required()
             return
         self.timer.start(1000)
-        self.btn_start.setText("⏸ Pause")
-        self.btn_start.setStyleSheet("background-color: #ef4444; color: white; border-radius: 12px; font-weight: bold; border: none;")
+        self.btn_start.setText("Pause")
+        self._set_start_button_icon(True)
+        bad = (self._theme_colors or {}).get("bad", "#ef4444")
+        self.btn_start.setStyleSheet(f"background-color: {bad}; color: white; border-radius: 12px; font-weight: bold; border: none;")
         if self.phase == "focus" and self.session_started_at is None:
             self.session_started_at = datetime.now()
             self.session_task_id = self.current_task_id
             self.session_task_title = self.current_task_title
+            self.session_task_priority = self.current_task_priority
             self.session_duration_min = self._phase_minutes(self.phase)
+        self._update_stop_button_visibility()
 
     def _ensure_tray(self):
         if self._tray is not None:
@@ -1430,28 +1544,29 @@ class PomodoroPage(QWidget):
     def _style_break_tips(self):
         if not hasattr(self, "tips_frame"):
             return
+        colors = self._theme_colors or {}
         if self._is_dark:
-            bg = "#111827"
-            border = "#1f2937"
-            title = "#9ca3af"
-            btn_bg = "#1f2937"
-            btn_border = "#2b3444"
-            btn_text = "#e5e7eb"
-            btn_hover = "#273449"
-            action_bg = "#0b3a5a"
-            action_border = "#1d4ed8"
-            action_text = "#bfdbfe"
+            bg = colors.get("card_alt", "#112844")
+            border = colors.get("border", "#25456B")
+            title = colors.get("text_sub", "#BAD2E0")
+            btn_bg = colors.get("card", "#0F2238")
+            btn_border = colors.get("border", "#25456B")
+            btn_text = colors.get("text_main", "#E6EEF5")
+            btn_hover = colors.get("accent_soft", "#1B2F4D")
+            action_bg = colors.get("accent_soft", "#1B2F4D")
+            action_border = colors.get("accent2", "#3078CD")
+            action_text = colors.get("accent", "#82AFF2")
         else:
-            bg = "#f1f5f9"
-            border = "#e2e8f0"
-            title = "#64748b"
-            btn_bg = "#ffffff"
-            btn_border = "#dbe2eb"
-            btn_text = "#334155"
-            btn_hover = "#e2e8f0"
-            action_bg = "#dbeafe"
-            action_border = "#60a5fa"
-            action_text = "#1d4ed8"
+            bg = colors.get("accent_soft", "#E6F0FA")
+            border = colors.get("border", "#BAD2E0")
+            title = colors.get("text_sub", "#47617C")
+            btn_bg = colors.get("card", "#FFFFFF")
+            btn_border = colors.get("border", "#BAD2E0")
+            btn_text = colors.get("deep", "#25456B")
+            btn_hover = colors.get("border", "#BAD2E0")
+            action_bg = colors.get("accent_soft", "#E6F0FA")
+            action_border = colors.get("accent", "#3078CD")
+            action_text = colors.get("accent", "#3078CD")
 
         self.tips_frame.setStyleSheet(
             f"QFrame#PomodoroTips {{ background-color: {bg}; border: 1px solid {border}; border-radius: 16px; }}"
@@ -1465,7 +1580,7 @@ class PomodoroPage(QWidget):
         )
         for b in (self.btn_hydrate, self.btn_stretch, self.btn_step):
             b.setStyleSheet(tip_style)
-        icon_color = "#38bdf8" if self._is_dark else "#0ea5e9"
+        icon_color = colors.get("accent", "#3078CD")
         self._set_tip_icons(icon_color)
 
         action_style = (
@@ -1475,6 +1590,49 @@ class PomodoroPage(QWidget):
         )
         self.btn_skip_break.setStyleSheet(action_style)
         self.btn_add_two.setStyleSheet(action_style)
+
+    def _apply_responsive_sizes(self):
+        if not hasattr(self, "timer_label") or not hasattr(self, "left_container"):
+            return
+        width = self.left_container.width()
+        if width <= 0:
+            return
+        try:
+            margins = self.left_vbox.contentsMargins()
+            width -= (margins.left() + margins.right())
+        except Exception:
+            pass
+
+        size = int(width * 0.6)
+        size = max(220, min(420, size))
+        if self.timer_label.width() != size:
+            self.timer_label.setFixedSize(size, size)
+
+        if hasattr(self, "badge"):
+            badge_w = max(110, min(200, int(size * 0.45)))
+            self.badge.setFixedSize(badge_w, 32)
+
+        btn_h = max(42, min(58, int(size * 0.16)))
+        start_w = max(140, min(220, int(size * 0.5)))
+        other_w = max(90, min(150, int(size * 0.35)))
+        if hasattr(self, "btn_start"):
+            self.btn_start.setFixedSize(start_w, btn_h)
+        if hasattr(self, "btn_stop"):
+            self.btn_stop.setFixedSize(other_w, btn_h)
+        if hasattr(self, "btn_reset"):
+            self.btn_reset.setFixedSize(other_w, btn_h)
+
+        colors = self._theme_colors or {}
+        accent = colors.get("accent", "#3078CD")
+        text_main = colors.get("text_main", "#113356")
+        bg = colors.get("bg", "#F8F6F2")
+        border = max(8, int(round(size * 0.0375)))
+        radius = size // 2
+        font_size = max(56, min(110, int(size * 0.26)))
+        self.timer_label.setStyleSheet(
+            f"font-size: {font_size}px; font-weight: 900; color: {text_main}; "
+            f"background-color: {bg}; border: {border}px solid {accent}; border-radius: {radius}px;"
+        )
 
     def _set_tip_icons(self, color):
         icon_color = QColor(color)
@@ -1561,10 +1719,11 @@ class PomodoroPage(QWidget):
         try:
             conn = get_db_connection()
             conn.execute(
-                "INSERT INTO pomodoro_sessions (task_id, task_title, started_at, ended_at, duration_min, status) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO pomodoro_sessions (task_id, task_title, task_priority, started_at, ended_at, duration_min, status) VALUES (?,?,?,?,?,?,?)",
                 (
                     self.session_task_id,
                     self.session_task_title,
+                    self.session_task_priority or self.current_task_priority,
                     self.session_started_at.strftime("%Y-%m-%d %H:%M:%S"),
                     ended_at.strftime("%Y-%m-%d %H:%M:%S"),
                     int(duration_min),
@@ -1579,5 +1738,6 @@ class PomodoroPage(QWidget):
             self.session_started_at = None
             self.session_task_id = None
             self.session_task_title = None
+            self.session_task_priority = None
             self.session_duration_min = None
         

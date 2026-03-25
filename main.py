@@ -5,10 +5,133 @@ import ctypes
 import traceback
 import signal
 import time
+import re
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
                              QVBoxLayout, QPushButton, QStackedWidget, QFrame, QLabel, QSizePolicy)
-from PyQt6.QtCore import Qt, QObject, QEvent
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtCore import Qt, QObject, QEvent, qInstallMessageHandler
+from PyQt6.QtGui import QIcon, QPixmap, QFontMetrics
+from resources.theme import get_theme, FONT_FAMILY
+
+_LAST_QSS_INFO = None
+
+def _install_qss_sanitizer():
+    try:
+        from PyQt6.QtWidgets import QWidget
+    except Exception:
+        return
+
+    original_set = QWidget.setStyleSheet
+
+    def _sanitize(style):
+        if not isinstance(style, str):
+            return style
+
+        # Remove unsupported properties if any slipped in.
+        s = re.sub(r"text-transform\\s*:\\s*uppercase\\s*;?", "", style)
+
+        def _fix_block(match):
+            block = match.group(0)
+            block = re.sub(r"font-weight\\s*:\\s*(900|800|700)\\s*;?", "font-weight: bold;", block)
+            return block
+
+        # Fix any QPushButton-related blocks (including subselectors)
+        s = re.sub(r"QPushButton[^\\{]*\\{[^\\}]*\\}", _fix_block, s, flags=re.DOTALL)
+        s = re.sub(r"QMessageBox\\s+QPushButton[^\\{]*\\{[^\\}]*\\}", _fix_block, s, flags=re.DOTALL)
+        return s
+
+    def _wrapped_set(self, style):
+        global _LAST_QSS_INFO
+        try:
+            _LAST_QSS_INFO = (self.__class__.__name__, self.objectName(), style)
+        except Exception:
+            _LAST_QSS_INFO = None
+        try:
+            return original_set(self, _sanitize(style))
+        except Exception:
+            return original_set(self, style)
+
+    QWidget.setStyleSheet = _wrapped_set
+
+def _install_qss_debug():
+    if os.getenv("PRODSMART_DEBUG_QSS") != "1":
+        return
+    try:
+        import PyQt6.sip as sip
+    except Exception:
+        try:
+            import sip  # type: ignore
+        except Exception:
+            sip = None
+    print("[QSS Debug] enabled")
+
+    qss_cache = {}
+    try:
+        from PyQt6.QtWidgets import QWidget as _QWidget, QPushButton as _QPushButton
+    except Exception:
+        _QWidget = None
+        _QPushButton = None
+
+    if sip and _QWidget and _QPushButton:
+        original_widget_set_style = _QWidget.setStyleSheet
+        original_btn_set_style = _QPushButton.setStyleSheet
+
+        def _cache_style(obj, style):
+            try:
+                ptr = sip.unwrapinstance(obj)
+                qss_cache[int(ptr)] = style
+            except Exception:
+                pass
+
+        def _wrapped_widget_set_style(self, style):
+            if isinstance(self, _QPushButton):
+                _cache_style(self, style)
+            return original_widget_set_style(self, style)
+
+        def _wrapped_btn_set_style(self, style):
+            _cache_style(self, style)
+            return original_btn_set_style(self, style)
+
+        _QWidget.setStyleSheet = _wrapped_widget_set_style
+        _QPushButton.setStyleSheet = _wrapped_btn_set_style
+
+    def _handler(msg_type, context, message):
+        print(message)
+        if "Could not parse stylesheet of object QPushButton" in message and sip:
+            match = re.search(r"QPushButton\((0x[0-9A-Fa-f]+)\)", message)
+            if match:
+                ptr_val = None
+                try:
+                    ptr_val = int(match.group(1), 16)
+                except Exception:
+                    ptr_val = None
+
+                obj = None
+                if ptr_val is not None:
+                    try:
+                        obj = sip.wrapinstance(ptr_val, QObject)
+                    except Exception:
+                        obj = None
+
+                if obj is not None:
+                    try:
+                        name = obj.objectName()
+                    except Exception:
+                        name = ""
+                    print(f"[QSS Debug] objectName='{name}' class={obj.__class__.__name__}")
+
+                if ptr_val is not None and ptr_val in qss_cache:
+                    print(f"[QSS Debug] styleSheet={qss_cache[ptr_val]}")
+                else:
+                    print("[QSS Debug] styleSheet not cached for this pointer.")
+
+                if _LAST_QSS_INFO:
+                    cls_name, obj_name, style = _LAST_QSS_INFO
+                    print(f"[QSS Debug] last_set_style widget={cls_name} objectName='{obj_name}'")
+                    print(f"[QSS Debug] last_set_style_sheet={style}")
+        elif "Could not parse stylesheet of object QPushButton" in message and sip is None:
+            print("[QSS Debug] sip module not available; cannot resolve QPushButton pointer.")
+
+    qInstallMessageHandler(_handler)
 
 # --- IMPORTS ---
 try:
@@ -30,6 +153,7 @@ class MainApp(QMainWindow):
         super().__init__()
         self.setWindowTitle("ProdSmart")
         self.resize(1200, 800)
+        self.setMinimumSize(640, 420)
 
         # --- SET WINDOW & TASKBAR ICON ---
         if os.path.exists("ProdSmart.png"):
@@ -42,13 +166,17 @@ class MainApp(QMainWindow):
         except: pass
 
         self.central_widget = QWidget()
+        self.central_widget.setMinimumSize(0, 0)
+        self.central_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.main_layout = QHBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
         # 1. SIDEBAR
         self.sidebar = QFrame()
-        self.sidebar.setFixedWidth(240)
+        self.sidebar.setMinimumWidth(190)
+        self.sidebar.setMaximumWidth(280)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.sidebar.setObjectName("Sidebar")
         sidebar_l = QVBoxLayout(self.sidebar)
         sidebar_l.setContentsMargins(12, 10, 12, 10)
@@ -61,21 +189,27 @@ class MainApp(QMainWindow):
         header_layout.setContentsMargins(14, 16, 14, 16)
         header_layout.setSpacing(10)
         header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.sidebar_header = header_widget
+        self.sidebar_header_layout = header_layout
 
         # Logo
         logo_icon = QLabel()
         logo_icon.setObjectName("SidebarLogo")
+        self._logo_pixmap = None
         if os.path.exists("ProdSmart.png"):
             pixmap = QPixmap("ProdSmart.png")
-            scaled_pixmap = pixmap.scaled(140, 140, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            logo_icon.setPixmap(scaled_pixmap)
-        logo_icon.setFixedSize(150, 150)
+            if not pixmap.isNull():
+                self._logo_pixmap = pixmap
         logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.logo_icon = logo_icon
 
         # Title
         logo_text = QLabel("ProdSmart")
         logo_text.setObjectName("SidebarTitle")
         logo_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.logo_text = logo_text
 
         header_layout.addWidget(logo_icon, alignment=Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(logo_text, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -124,6 +258,8 @@ class MainApp(QMainWindow):
 
         # 2. CONTENT (STACK)
         self.content_stack = QStackedWidget()
+        self.content_stack.setMinimumSize(0, 0)
+        self.content_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # Initialize pages
         self.page_tasks = TasksPage()
@@ -144,7 +280,7 @@ class MainApp(QMainWindow):
         self.content_stack.addWidget(self.page_report)     # Index 6
         self.content_stack.addWidget(self.page_quick_stats) # Index 7
 
-        self.main_layout.addWidget(self.content_stack)
+        self.main_layout.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(self.central_widget)
 
         # Suppress tiny transient windows that can flash during page switches.
@@ -242,9 +378,9 @@ class MainApp(QMainWindow):
         elif index == 7:
             self._set_active_nav(self.btn_history)
 
-    def open_pomodoro_for_task(self, t_id, title):
+    def open_pomodoro_for_task(self, t_id, title, priority=None):
         if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
-            self.page_pomodoro.set_task(t_id, title)
+            self.page_pomodoro.set_task(t_id, title, priority)
         self.content_stack.setCurrentIndex(3)
         self._set_active_nav(self.btn_pomodoro)
 
@@ -335,6 +471,12 @@ class MainApp(QMainWindow):
 
         if hasattr(self, 'page_quick_stats'):
             self.page_quick_stats.update_theme(theme)
+        if hasattr(self, 'page_settings'):
+            try:
+                if hasattr(self.page_settings, 'update_theme'):
+                    self.page_settings.update_theme(theme)
+            except Exception:
+                pass
         # Pomodoro page has its own `apply_theme` which reloads settings like auto-start
         if hasattr(self, 'page_pomodoro'):
             try:
@@ -353,93 +495,165 @@ class MainApp(QMainWindow):
                     self.page_tasks.update_theme(theme)
             except Exception:
                 pass
+        self._update_sidebar_logo()
+
+    def _update_sidebar_logo(self):
+        if not hasattr(self, "logo_icon"):
+            return
+        sidebar_w = self.sidebar.width() if hasattr(self, "sidebar") else self.width()
+        sidebar_h = self.sidebar.height() if hasattr(self, "sidebar") else self.height()
+        if hasattr(self, "sidebar_header_layout"):
+            try:
+                self.sidebar_header_layout.setContentsMargins(12, 12, 12, 12)
+                self.sidebar_header_layout.setAlignment(
+                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+                )
+            except Exception:
+                pass
+
+        # Compute header bounds and fit logo + text vertically without overlap.
+        header_max_h = max(100, int(sidebar_h * 0.30))
+        if hasattr(self, "sidebar_header"):
+            self.sidebar_header.setMaximumHeight(header_max_h)
+            header_h = self.sidebar_header.height() or header_max_h
+        else:
+            header_h = header_max_h
+
+        margins = self.sidebar_header_layout.contentsMargins() if hasattr(self, "sidebar_header_layout") else None
+        if margins:
+            available_w = max(1, sidebar_w - margins.left() - margins.right())
+            available_h = max(1, header_h - margins.top() - margins.bottom())
+        else:
+            available_w = max(1, sidebar_w - 20)
+            available_h = max(1, header_h - 20)
+
+        # Size title font first, then fit logo in remaining space.
+        if hasattr(self, "logo_text"):
+            font = self.logo_text.font()
+            font.setPointSize(max(6, min(10, int(header_h / 14))))
+            font.setBold(True)
+            self.logo_text.setFont(font)
+            text_h = QFontMetrics(font).height()
+            self.logo_text.setFixedHeight(text_h)
+            self.logo_text.setVisible(True)
+        else:
+            text_h = 0
+
+        spacing = max(4, int(text_h * 0.6)) if hasattr(self, "sidebar_header_layout") else 6
+        if hasattr(self, "sidebar_header_layout"):
+            try:
+                self.sidebar_header_layout.setSpacing(spacing)
+            except Exception:
+                pass
+
+        available_h = max(1, available_h - text_h - spacing)
+
+        target_w = max(40, min(120, available_w))
+        target_h = max(40, min(120, available_h))
+        target = min(target_w, target_h)
+        self.logo_icon.setFixedSize(target, target)
+        if self._logo_pixmap:
+            inner = max(28, target - 14)
+            scaled = self._logo_pixmap.scaled(
+                inner,
+                inner,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.logo_icon.setPixmap(scaled)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_sidebar_logo()
 
     # --- STYLE LIGHT ---
     def set_light_theme(self):
-        self.setStyleSheet("""
+        c = get_theme("Light")
+        self.setStyleSheet(f"""
             /* GLOBAL */
-            QMainWindow { background-color: #f8f9fa; color: #1e293b; }
-            QWidget { color: #1e293b; }
-            QFrame#Sidebar { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
-            QWidget#SidebarHeader { background-color: #f8fafc; border-radius: 14px; margin: 12px; }
-            QLabel#SidebarLogo { background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 6px; }
-            QLabel#SidebarTitle { font-size: 20px; font-weight: 900; color: #2563eb; }
-            QFrame#SidebarSeparator { background-color: #e2e8f0; margin: 8px 10px; }
+            QMainWindow {{ background-color: {c['bg']}; color: {c['text']}; }}
+            QWidget {{ color: {c['text']}; font-family: '{FONT_FAMILY}', 'Segoe UI'; }}
+            QFrame#Sidebar {{ background-color: {c['card']}; border-right: 1px solid {c['border']}; }}
+            QWidget#SidebarHeader {{ background-color: {c['card_alt']}; border-radius: 14px; margin: 12px; }}
+            QLabel#SidebarLogo {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; padding: 6px; }}
+            QLabel#SidebarTitle {{ font-weight: 800; color: {c['accent']}; }}
+            QFrame#SidebarSeparator {{ background-color: {c['border']}; margin: 8px 10px; }}
             
             /* SIDEBAR BUTTONS */
-            QFrame#Sidebar QPushButton[nav="true"] { background-color: transparent; padding: 12px 14px; border: none; border-radius: 10px; color: #475569; font-weight: bold; }
-            QFrame#Sidebar QPushButton[nav="true"]:hover { background-color: #eef2f7; color: #1d4ed8; }
-            QFrame#Sidebar QPushButton[nav="true"][active="true"] { 
+            QFrame#Sidebar QPushButton[nav="true"] {{ background-color: transparent; padding: 12px 14px; border: none; border-radius: 10px; color: {c['deep']}; font-weight: bold; }}
+            QFrame#Sidebar QPushButton[nav="true"]:hover {{ background-color: {c['accent_soft']}; color: {c['accent']}; }}
+            QFrame#Sidebar QPushButton[nav="true"][active="true"] {{ 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #2563eb, stop:0.03 #2563eb, stop:0.03 #e7f0ff, stop:1 #e7f0ff);
-                color: #1d4ed8;
-            }
-            QFrame#Sidebar QPushButton[nav="true"][active="true"]:hover { 
+                    stop:0 {c['accent']}, stop:0.03 {c['accent']}, stop:0.03 {c['accent_soft']}, stop:1 {c['accent_soft']});
+                color: {c['accent']};
+            }}
+            QFrame#Sidebar QPushButton[nav="true"][active="true"]:hover {{ 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #1d4ed8, stop:0.03 #1d4ed8, stop:0.03 #dde9ff, stop:1 #dde9ff);
-            }
+                    stop:0 {c['accent2']}, stop:0.03 {c['accent2']}, stop:0.03 {c['accent_soft']}, stop:1 {c['accent_soft']});
+            }}
             
             /* SETTINGS SPECIFIC */
-            QFrame#SettingsCard { background-color: white; border: 1px solid #e2e8f0; border-radius: 12px; }
-            QLabel#SettingsLabel { color: #1e293b; }
-            QComboBox { background-color: white; border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px; color: #1e293b; }
-            QComboBox QAbstractItemView { background-color: white; color: #1e293b; selection-background-color: #edf2f7; selection-color: #2563eb; }
+            QFrame#SettingsCard {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+            QLabel#SettingsLabel {{ color: {c['text']}; }}
+            QComboBox {{ background-color: {c['input_bg']}; border: 1px solid {c['input_border']}; border-radius: 6px; padding: 5px; color: {c['text']}; }}
+            QComboBox QAbstractItemView {{ background-color: {c['card']}; color: {c['text']}; selection-background-color: {c['accent_soft']}; selection-color: {c['accent']}; }}
 
-            /* QMessageBox (ensure readable text in light theme) */
-            QMessageBox { background-color: #ffffff; }
-            QMessageBox QLabel { color: #1e293b; }
-            QMessageBox QPushButton {
-                color: #1e293b;
-                background-color: #e2e8f0;
-                border: 1px solid #cbd5e1;
+            /* QMessageBox */
+            QMessageBox {{ background-color: {c['card']}; }}
+            QMessageBox QLabel {{ color: {c['text']}; }}
+            QMessageBox QPushButton {{
+                color: {c['text']};
+                background-color: {c['accent_soft']};
+                border: 1px solid {c['border']};
                 padding: 6px 12px;
                 border-radius: 6px;
-            }
-            QMessageBox QPushButton:hover { background-color: #cbd5e1; }
+            }}
+            QMessageBox QPushButton:hover {{ background-color: {c['border']}; }}
         """)
 
     # --- STYLE DARK ---
     def set_dark_theme(self):
-        self.setStyleSheet("""
+        c = get_theme("Dark")
+        self.setStyleSheet(f"""
             /* GLOBAL */
-            QMainWindow { background-color: #121212; color: #e0e0e0; }
-            QWidget { color: #e0e0e0; }
-            QFrame#Sidebar { background-color: #1b1f26; border-right: 1px solid #2b3038; }
-            QWidget#SidebarHeader { background-color: #202632; border-radius: 14px; margin: 12px; }
-            QLabel#SidebarLogo { background-color: #111827; border: 1px solid #2b3038; border-radius: 12px; padding: 6px; }
-            QLabel#SidebarTitle { font-size: 20px; font-weight: 900; color: #93c5fd; }
-            QFrame#SidebarSeparator { background-color: #2b3340; margin: 8px 10px; }
+            QMainWindow {{ background-color: {c['bg']}; color: {c['text']}; }}
+            QWidget {{ color: {c['text']}; font-family: '{FONT_FAMILY}', 'Segoe UI'; }}
+            QFrame#Sidebar {{ background-color: {c['card']}; border-right: 1px solid {c['border']}; }}
+            QWidget#SidebarHeader {{ background-color: {c['card_alt']}; border-radius: 14px; margin: 12px; }}
+            QLabel#SidebarLogo {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; padding: 6px; }}
+            QLabel#SidebarTitle {{ font-weight: 800; color: {c['accent']}; }}
+            QFrame#SidebarSeparator {{ background-color: {c['border']}; margin: 8px 10px; }}
             
             /* SIDEBAR BUTTONS */
-            QFrame#Sidebar QPushButton[nav="true"] { background-color: transparent; padding: 12px 14px; border: none; border-radius: 10px; color: #b3bac6; font-weight: bold; }
-            QFrame#Sidebar QPushButton[nav="true"]:hover { background-color: #2b3340; color: #93c5fd; }
-            QFrame#Sidebar QPushButton[nav="true"][active="true"] { 
+            QFrame#Sidebar QPushButton[nav="true"] {{ background-color: transparent; padding: 12px 14px; border: none; border-radius: 10px; color: {c['sub']}; font-weight: bold; }}
+            QFrame#Sidebar QPushButton[nav="true"]:hover {{ background-color: {c['card_alt']}; color: {c['accent2']}; }}
+            QFrame#Sidebar QPushButton[nav="true"][active="true"] {{ 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #60a5fa, stop:0.03 #60a5fa, stop:0.03 #243042, stop:1 #243042);
-                color: #bfdbfe;
-            }
-            QFrame#Sidebar QPushButton[nav="true"][active="true"]:hover { 
+                    stop:0 {c['accent2']}, stop:0.03 {c['accent2']}, stop:0.03 {c['card_alt']}, stop:1 {c['card_alt']});
+                color: {c['accent']};
+            }}
+            QFrame#Sidebar QPushButton[nav="true"][active="true"]:hover {{ 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #93c5fd, stop:0.03 #93c5fd, stop:0.03 #2f3a4b, stop:1 #2f3a4b);
-            }
+                    stop:0 {c['accent']}, stop:0.03 {c['accent']}, stop:0.03 {c['card_alt']}, stop:1 {c['card_alt']});
+            }}
             
             /* SETTINGS SPECIFIC */
-            QFrame#SettingsCard { background-color: #1e1e1e; border: 1px solid #333; border-radius: 12px; }
-            QLabel#SettingsLabel { color: #e0e0e0; }
-            QComboBox { background-color: #2d2d2d; border: 1px solid #444; border-radius: 6px; padding: 5px; color: white; }
-            QComboBox QAbstractItemView { background-color: #2d2d2d; color: white; selection-background-color: #2563eb; selection-color: white; }
+            QFrame#SettingsCard {{ background-color: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+            QLabel#SettingsLabel {{ color: {c['text']}; }}
+            QComboBox {{ background-color: {c['input_bg']}; border: 1px solid {c['input_border']}; border-radius: 6px; padding: 5px; color: {c['text']}; }}
+            QComboBox QAbstractItemView {{ background-color: {c['input_bg']}; color: {c['text']}; selection-background-color: {c['accent2']}; selection-color: {c['text']}; }}
 
-            /* QMessageBox (ensure readable text in dark theme) */
-            QMessageBox { background-color: #1e1e1e; }
-            QMessageBox QLabel { color: #e0e0e0; }
-            QMessageBox QPushButton {
-                color: #e0e0e0;
-                background-color: #2b3038;
-                border: 1px solid #3b4350;
+            /* QMessageBox */
+            QMessageBox {{ background-color: {c['card']}; }}
+            QMessageBox QLabel {{ color: {c['text']}; }}
+            QMessageBox QPushButton {{
+                color: {c['text']};
+                background-color: {c['card_alt']};
+                border: 1px solid {c['border']};
                 padding: 6px 12px;
                 border-radius: 6px;
-            }
-            QMessageBox QPushButton:hover { background-color: #3b4350; }
+            }}
+            QMessageBox QPushButton:hover {{ background-color: {c['border']}; }}
         """)
 
 
@@ -448,7 +662,7 @@ class _TransientWindowBlocker(QObject):
         super().__init__(main_window)
         self._main_window = main_window
         self._suppress_until = 0.0
-        self._debug = os.getenv("PRODSMART_DEBUG_WINDOWS") == "1"
+        self._debug = "--debug-windows" in sys.argv
 
     def suppress_for(self, ms):
         self._suppress_until = time.monotonic() + (ms / 1000.0)
@@ -524,6 +738,8 @@ if __name__ == "__main__":
     try:
         init_db()
         app = QApplication(sys.argv)
+        _install_qss_sanitizer()
+        _install_qss_debug()
         
         if os.path.exists("ProdSmart.png"):
             app.setWindowIcon(QIcon("ProdSmart.png"))
@@ -532,7 +748,7 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, lambda *_: app.quit())
 
         window = MainApp()
-        window.show()
+        window.showMaximized()
         sys.exit(app.exec())
     except KeyboardInterrupt:
         pass

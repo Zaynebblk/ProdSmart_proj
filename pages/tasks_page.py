@@ -6,35 +6,61 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QPushButton, QScrollArea, QDialog,
                              QLineEdit, QDateEdit, QComboBox, QMessageBox,
                              QCheckBox, QGraphicsDropShadowEffect, QSizePolicy,
-                             QSystemTrayIcon)
+                             QSystemTrayIcon, QGridLayout)
 from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtGui import QColor, QIcon, QFontMetrics
 from PyQt6.QtMultimedia import QSoundEffect
+from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.priority import (
+    normalize_priority,
+    priority_to_quadrant,
+    quadrant_from_flags,
+)
+
+# --- NO WHEEL COMBOBOX ---
+class NoWheelComboBox(QComboBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ensure_font_size()
+
+    def _ensure_font_size(self):
+        font = self.font()
+        if font.pointSize() <= 0:
+            font.setPointSize(10)
+            self.setFont(font)
+        view = self.view()
+        if view:
+            view_font = view.font()
+            if view_font.pointSize() <= 0:
+                view_font.setPointSize(10)
+                view.setFont(view_font)
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 # --- STYLES HELPER ---
 def get_dialog_style(theme):
-    if theme == "Dark":
-        return """
-            QDialog { background-color: #113356; }
-            QLabel { color: #e6eef5; font-weight: 600; font-size: 13px; padding-top: 10px; }
-            QLineEdit, QDateEdit, QComboBox {
-                background-color: #1b2f4d; border: 1px solid #25456B;
-                border-radius: 10px; padding: 10px; font-size: 14px; color: white;
-            }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #82AFF2; }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView { background-color: #1b2f4d; color: white; selection-background-color: #3078CD; }
-        """
-    else:
-        return """
-            QDialog { background-color: #F8F6F2; }
-            QLabel { color: #25456B; font-weight: 600; font-size: 13px; padding-top: 10px; }
-            QLineEdit, QDateEdit, QComboBox {
-                background-color: #ffffff; border: 1px solid #BAD2E0;
-                border-radius: 10px; padding: 10px; font-size: 14px; color: #113356;
-            }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #3078CD; background: white; }
-        """
+    c = get_theme(theme)
+    is_dark = theme == "Dark"
+    dialog_bg = c["card_alt"] if is_dark else c["bg"]
+    input_bg = c["input_bg"]
+    focus = c["accent2"]
+    text_color = c["text"]
+    return f"""
+        QDialog {{ background-color: {dialog_bg}; }}
+        QLabel {{ color: {text_color}; font-weight: 600; font-size: 13px; padding-top: 10px; }}
+        QLineEdit, QDateEdit {{
+            background-color: {input_bg}; border: 1px solid {c['border']};
+            border-radius: 10px; padding: 10px; font-size: 14px; color: {text_color};
+        }}
+        QComboBox {{
+            background-color: {input_bg}; border: 1px solid {c['border']};
+            border-radius: 10px; padding: 10px; font-size: 10.5pt; color: {text_color};
+        }}
+        QLineEdit:focus, QDateEdit:focus {{ border: 1px solid {focus}; }}
+        QComboBox::drop-down {{ border: none; }}
+        QComboBox QAbstractItemView {{ background-color: {input_bg}; color: {text_color}; selection-background-color: {c['accent']}; }}
+    """
 
 PALETTE = {
     "mist": "#BAD2E0",
@@ -90,6 +116,12 @@ class AddTaskDialog(QDialog):
         self.title_input.setPlaceholderText("What needs to be done?")
         layout.addWidget(self.title_input)
 
+        self.title_error = QLabel("Champ requis")
+        self.title_error.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: 600;")
+        self.title_error.setVisible(False)
+        layout.addWidget(self.title_error)
+        self.title_input.textChanged.connect(lambda _: self._set_title_error(False))
+
         self.desc_input = QLineEdit()
         self.desc_input.setPlaceholderText("Add details...")
         layout.addWidget(self.desc_input)
@@ -102,32 +134,11 @@ class AddTaskDialog(QDialog):
         self.date_input.setCalendarPopup(True)
         self.date_input.setDate(QDate.currentDate())
 
-        self.priority_input = QComboBox()
-        self.priority_input.addItem("Too Low (Delete)", "too low")
-        self.priority_input.addItem("Low (Delegate)", "low")
-        self.priority_input.addItem("Medium (Schedule)", "medium")
-        self.priority_input.addItem("High (Do First)", "high")
-
-        # --- NEW LOGIC: READ FROM SETTINGS ---
-        default_index = 2 # fallback is Medium
-        try:
-            if os.path.exists("settings.json"):
-                with open("settings.json", "r") as f:
-                    data = json.load(f)
-                    prio_setting = data.get("default_priority", "Medium")
-
-                    # Map settings text to dropdown index
-                    if prio_setting == "Too Low": default_index = 0
-                    elif prio_setting == "Low": default_index = 1
-                    elif prio_setting == "Medium": default_index = 2
-                    elif prio_setting == "High": default_index = 3
-        except:
-            pass # Use default Medium if error
-
-        self.priority_input.setCurrentIndex(default_index)
+        self.important_check = QCheckBox("Important", self)
+        self.important_check.setCursor(Qt.CursorShape.PointingHandCursor)
 
         row.addWidget(self.date_input)
-        row.addWidget(self.priority_input)
+        row.addWidget(self.important_check)
         layout.addLayout(row)
 
         layout.addSpacing(10)
@@ -149,19 +160,29 @@ class AddTaskDialog(QDialog):
         btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
 
-    def load_data(self, title, desc, date_str, priority):
+    def _set_title_error(self, show):
+        self.title_error.setVisible(bool(show))
+
+    def accept(self):
+        if not self.title_input.text().strip():
+            self._set_title_error(True)
+            self.title_input.setFocus()
+            return
+        self._set_title_error(False)
+        super().accept()
+
+    def load_data(self, title, desc, date_str, important):
         self.title_input.setText(title)
         self.desc_input.setText(desc)
         if date_str: self.date_input.setDate(QDate.fromString(date_str, "yyyy-MM-dd"))
-        idx = self.priority_input.findData(priority)
-        if idx >= 0: self.priority_input.setCurrentIndex(idx)
+        self.important_check.setChecked(bool(important))
 
     def get_data(self):
         return {
             "title": self.title_input.text(),
             "description": self.desc_input.text(),
             "date": self.date_input.date().toString("yyyy-MM-dd"),
-            "priority": self.priority_input.currentData()
+            "important": self.important_check.isChecked()
         }
 
 class ViewTaskDialog(QDialog):
@@ -263,18 +284,19 @@ class ViewTaskDialog(QDialog):
 
 # --- TASK CARD ---
 class TaskCard(QFrame):
-    def __init__(self, t_id, title, desc, due_date_pretty, created_date_pretty, priority, focus_minutes, parent_page):
+    def __init__(self, t_id, title, desc, due_date_pretty, created_date_pretty, priority, focus_minutes, parent_page, is_completed=False):
         super().__init__()
         self.t_id = t_id
         self.parent_page = parent_page
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedWidth(300)
+        self.setMinimumWidth(240)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setObjectName("TaskCard")
 
-        self.priority = priority
+        self.priority = normalize_priority(priority) or "too low"
         self.title_text = title
         self.current_theme = "Light"
-        self.accent_color = PRIORITY_COLORS.get(priority.lower(), "#94a3b8")
+        self.accent_color = PRIORITY_COLORS.get(self.priority.lower(), "#94a3b8")
         self.focus_minutes = int(focus_minutes or 0)
 
         self.shadow = QGraphicsDropShadowEffect(self)
@@ -313,7 +335,7 @@ class TaskCard(QFrame):
         self.checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.checkbox.toggled.connect(self.on_checked)
 
-        self.badge = QLabel(priority.upper(), content)
+        self.badge = QLabel(self.priority.upper(), content)
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge.setFixedSize(78, 22)
         self.badge.setStyleSheet("font-size: 9px; font-weight: 900;")
@@ -361,9 +383,9 @@ class TaskCard(QFrame):
         self.btn_edit.setMinimumWidth(52)
         self.btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_edit.setStyleSheet(
-            "QPushButton { background: #3078CD; border: 1px solid #25456B; color: white; "
+            "QPushButton { background-color: #3078CD; border: 1px solid #25456B; color: white; "
             "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-            "QPushButton:hover { background: #25456B; border-color: #25456B; }"
+            "QPushButton:hover { background-color: #25456B; border-color: #25456B; }"
         )
         self.btn_edit.clicked.connect(self.on_edit)
 
@@ -372,9 +394,9 @@ class TaskCard(QFrame):
         self.btn_del.setMinimumWidth(60)
         self.btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del.setStyleSheet(
-            "QPushButton { background: #ef4444; border: 1px solid #b91c1c; color: white; "
+            "QPushButton { background-color: #ef4444; border: 1px solid #b91c1c; color: white; "
             "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-            "QPushButton:hover { background: #b91c1c; border-color: #7f1d1d; }"
+            "QPushButton:hover { background-color: #b91c1c; border-color: #7f1d1d; }"
         )
         self.btn_del.clicked.connect(self.on_delete)
 
@@ -393,70 +415,83 @@ class TaskCard(QFrame):
         footer.addLayout(actions_layout)
         layout.addLayout(footer)
 
+        self._set_checked_state(is_completed)
         self.update_theme("Light")
 
+    def _set_checked_state(self, checked):
+        checked = bool(checked)
+        self.checkbox.blockSignals(True)
+        self.checkbox.setChecked(checked)
+        self.checkbox.blockSignals(False)
+        f = self.lbl_title.font()
+        f.setStrikeOut(checked)
+        self.lbl_title.setFont(f)
+        self._apply_text_styles(checked)
+
     def _apply_text_styles(self, checked=False):
+        colors = get_theme(self.current_theme)
         checked_color = "#22c55e"
         if self.current_theme == "Dark":
-            title_color = checked_color if checked else "#F8F6F2"
-            desc_color = "#BAD2E0" if not checked else checked_color
+            title_color = checked_color if checked else colors["text"]
+            desc_color = colors["sub"] if not checked else checked_color
         else:
-            title_color = checked_color if checked else "#113356"
-            desc_color = checked_color if checked else "#25456B"
+            title_color = checked_color if checked else colors["text"]
+            desc_color = checked_color if checked else colors["sub"]
 
         self.lbl_title.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800; border: none; background: transparent;")
         self.lbl_desc.setStyleSheet(f"color: {desc_color}; font-size: 11px; border: none; background: transparent;")
 
     def update_theme(self, theme):
         self.current_theme = theme
+        colors = get_theme(theme)
         accent = self.accent_color
         if theme == "Dark":
-            card_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #162b45, stop:1 #0f2238)"
-            border = "#25456B"
-            hover_border = "#82AFF2"
-            created_color = "#9bb5cc"
-            due_color = "#82AFF2"
-            focus_color = "#7dd3fc"
-            checkbox_border = "#315a85"
-            checkbox_bg = "#0f2238"
+            card_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card_alt']}, stop:1 {colors['bg']})"
+            border = colors["border"]
+            hover_border = colors["accent2"]
+            created_color = colors["sub"]
+            due_color = colors["accent2"]
+            focus_color = colors["accent"]
+            checkbox_border = colors["border"]
+            checkbox_bg = colors["card_alt"]
             edit_style = (
-                "QPushButton { background: #3078CD; border: 1px solid #1f3a5a; color: white; "
-                "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #25456B; border-color: #25456B; }"
+                f"QPushButton {{ background-color: {colors['accent']}; border: 1px solid {colors['deep']}; color: white; "
+                f"border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }} "
+                f"QPushButton:hover {{ background-color: {colors['deep']}; border-color: {colors['deep']}; }}"
             )
             del_style = (
-                "QPushButton { background: #ef4444; border: 1px solid #7f1d1d; color: white; "
+                "QPushButton { background-color: #ef4444; border: 1px solid #7f1d1d; color: white; "
                 "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #b91c1c; border-color: #7f1d1d; }"
+                "QPushButton:hover { background-color: #b91c1c; border-color: #7f1d1d; }"
             )
             focus_style = (
-                "QPushButton { background: #22c55e; border: 1px solid #15803d; color: white; "
+                "QPushButton { background-color: #22c55e; border: 1px solid #15803d; color: white; "
                 "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #16a34a; border-color: #166534; }"
+                "QPushButton:hover { background-color: #16a34a; border-color: #166534; }"
             )
         else:
-            card_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ffffff, stop:1 #F5F9FD)"
-            border = "#D7E3EE"
-            hover_border = "#3078CD"
-            created_color = "#6e90ad"
-            due_color = "#25456B"
-            focus_color = "#2563eb"
-            checkbox_border = "#BAD2E0"
-            checkbox_bg = "#ffffff"
+            card_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card']}, stop:1 {colors['accent_soft']})"
+            border = colors["border"]
+            hover_border = colors["accent"]
+            created_color = colors["sub"]
+            due_color = colors["deep"]
+            focus_color = colors["accent"]
+            checkbox_border = colors["border"]
+            checkbox_bg = colors["card"]
             edit_style = (
-                "QPushButton { background: #3078CD; border: 1px solid #25456B; color: white; "
-                "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #25456B; border-color: #25456B; }"
+                f"QPushButton {{ background-color: {colors['accent']}; border: 1px solid {colors['deep']}; color: white; "
+                f"border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }} "
+                f"QPushButton:hover {{ background-color: {colors['deep']}; border-color: {colors['deep']}; }}"
             )
             del_style = (
-                "QPushButton { background: #ef4444; border: 1px solid #b91c1c; color: white; "
+                "QPushButton { background-color: #ef4444; border: 1px solid #b91c1c; color: white; "
                 "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #b91c1c; border-color: #7f1d1d; }"
+                "QPushButton:hover { background-color: #b91c1c; border-color: #7f1d1d; }"
             )
             focus_style = (
-                "QPushButton { background: #22c55e; border: 1px solid #16a34a; color: white; "
+                "QPushButton { background-color: #22c55e; border: 1px solid #16a34a; color: white; "
                 "border-radius: 8px; font-weight: bold; font-size: 10px; padding: 0px 10px; }"
-                "QPushButton:hover { background: #16a34a; border-color: #166534; }"
+                "QPushButton:hover { background-color: #16a34a; border-color: #166534; }"
             )
 
         self.setStyleSheet(
@@ -511,18 +546,22 @@ class TaskCard(QFrame):
 
     def on_edit(self): self.parent_page.edit_task(self.t_id)
     def on_delete(self): self.parent_page.delete_task(self.t_id)
-    def on_focus(self): self.parent_page.start_pomodoro(self.t_id, self.title_text)
+    def on_focus(self): self.parent_page.start_pomodoro(self.t_id, self.title_text, self.priority)
 
 # --- COLUMNS ---
 class DayColumn(QWidget):
     def __init__(self, title, is_today=False, theme="Light"):
         super().__init__()
-        self.setFixedWidth(340)
+        self.setMinimumWidth(260)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.cards = []
         self.title = title
         self.count = 0
         self.is_today = is_today
         self.current_theme = theme
+        self._label_color = None
+        self._label_base_size = 16
+        self._label_min_size = 8
         self.setObjectName("DayColumn")
 
         outer = QVBoxLayout(self)
@@ -532,12 +571,14 @@ class DayColumn(QWidget):
         self.panel = QFrame(self)
         self.panel.setObjectName("DayPanel")
         self.panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         layout = QVBoxLayout(self.panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
         self.lbl = QLabel(title, self.panel)
+        self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.lbl)
 
         self.accent = QFrame(self.panel)
@@ -547,7 +588,7 @@ class DayColumn(QWidget):
 
         self.card_layout = QVBoxLayout()
         self.card_layout.setSpacing(16)
-        self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.card_layout.setContentsMargins(0, 6, 0, 6)
 
         layout.addLayout(self.card_layout)
@@ -563,31 +604,82 @@ class DayColumn(QWidget):
         self.card_layout.addWidget(card)
 
     def _update_label(self):
+        self._apply_label_fit()
+
+    def _label_text_full(self):
         suffix = "task" if self.count == 1 else "tasks"
-        self.lbl.setText(f"{self.title}  -  {self.count} {suffix}")
+        return f"{self.title}  -  {self.count} {suffix}"
+
+    def _title_available_width(self):
+        available = self.lbl.width()
+        if available <= 10:
+            available = max(10, self.panel.width() - 24)
+        return available
+
+    def _fit_size_for_text(self, base_size):
+        text = self._label_text_full()
+        available = self._title_available_width()
+        font = self.lbl.font()
+        chosen_size = self._label_min_size
+        for size in range(int(base_size), self._label_min_size - 1, -1):
+            font.setPointSize(size)
+            metrics = QFontMetrics(font)
+            if metrics.horizontalAdvance(text) <= available:
+                chosen_size = size
+                break
+        return chosen_size
+
+    def apply_title_font_size(self, size):
+        text = self._label_text_full()
+        font = self.lbl.font()
+        font.setPointSize(int(size))
+        self.lbl.setFont(font)
+        self.lbl.setText(text)
+        self.lbl.setToolTip(text)
+
+    def _apply_label_fit(self):
+        parent = self.parentWidget()
+        while parent is not None and not hasattr(parent, "_sync_column_title_sizes"):
+            parent = parent.parentWidget()
+        if parent and hasattr(parent, "_sync_column_title_sizes"):
+            parent._sync_column_title_sizes()
+            return
+        base_size = self._label_base_size
+        available = self._title_available_width()
+        if available > 0:
+            base_size = int(round(max(self._label_min_size, min(self._label_base_size, available / 18))))
+        chosen_size = self._fit_size_for_text(base_size)
+        self.apply_title_font_size(chosen_size)
 
     def update_theme(self, theme):
         self.current_theme = theme
         is_today = self.is_today
-        color = "#3078CD" if is_today else ("#BAD2E0" if theme == "Dark" else "#25456B")
-        self.lbl.setStyleSheet(f"font-size: 16px; font-weight: 900; color: {color}; margin-bottom: 8px; background: transparent; border: none;")
-        accent_color = "#3078CD" if is_today else ("#25456B" if theme == "Dark" else "#BAD2E0")
+        colors = get_theme(theme)
+        color = colors["accent"] if is_today else colors["sub"]
+        self._label_color = color
+        self.lbl.setStyleSheet(f"font-weight: 900; color: {color}; margin-bottom: 8px; background: transparent; border: none;")
+        accent_color = colors["accent"] if is_today else colors["border"]
         self.accent.setStyleSheet(f"background: {accent_color}; border-radius: 2px;")
         if theme == "Dark":
             self.panel.setStyleSheet(
-                "QFrame#DayPanel { background: rgba(15, 34, 56, 0.55); border: 1px solid #25456B; border-radius: 18px; }"
+                f"QFrame#DayPanel {{ background: {rgba(colors['card_alt'], 0.7)}; border: 1px solid {colors['border']}; border-radius: 18px; }}"
             )
         else:
             self.panel.setStyleSheet(
-                "QFrame#DayPanel { background: rgba(255, 255, 255, 0.7); border: 1px solid #D7E3EE; border-radius: 18px; }"
+                f"QFrame#DayPanel {{ background: {rgba(colors['card'], 0.85)}; border: 1px solid {colors['border']}; border-radius: 18px; }}"
             )
         for card in self.cards:
             card.update_theme(theme)
+        self._apply_label_fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_label_fit()
 
 # --- MAIN PAGE ---
 class TasksPage(QWidget):
     task_added = pyqtSignal()
-    pomodoro_requested = pyqtSignal(int, str)
+    pomodoro_requested = pyqtSignal(int, str, str)
 
     def __init__(self):
         super().__init__()
@@ -614,22 +706,24 @@ class TasksPage(QWidget):
         # Header
         self.header_frame = QFrame()
         self.header_frame.setObjectName("TasksHeader")
-        header_layout = QHBoxLayout(self.header_frame)
+        header_layout = QGridLayout(self.header_frame)
         header_layout.setContentsMargins(24, 20, 24, 20)
         header_layout.setSpacing(16)
+        self.header_layout = header_layout
 
         txt_layout = QVBoxLayout()
         txt_layout.setSpacing(6)
 
         self.welcome = QLabel("WELCOME")
         self.title = QLabel("Your Creative Flow")
+        self.title.setWordWrap(True)
         self.subtitle = QLabel("")
+        self.subtitle.setWordWrap(True)
 
         txt_layout.addWidget(self.welcome)
         txt_layout.addWidget(self.title)
         txt_layout.addWidget(self.subtitle)
-        header_layout.addLayout(txt_layout)
-        header_layout.addStretch()
+        self.header_text_layout = txt_layout
 
         chips_layout = QHBoxLayout()
         chips_layout.setSpacing(8)
@@ -637,9 +731,11 @@ class TasksPage(QWidget):
         self.chip_due = QLabel("0 due today")
         chips_layout.addWidget(self.chip_total)
         chips_layout.addWidget(self.chip_due)
+        self.header_chips_layout = chips_layout
 
         btn_add = QPushButton("+ New Task")
-        btn_add.setFixedSize(150, 44)
+        btn_add.setMinimumSize(120, 44)
+        btn_add.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.setStyleSheet(STYLES["btn_primary"])
         shadow = QGraphicsDropShadowEffect(btn_add)
@@ -649,8 +745,8 @@ class TasksPage(QWidget):
         btn_add.setGraphicsEffect(shadow)
         btn_add.clicked.connect(self.prompt_new_task)
 
-        header_layout.addLayout(chips_layout)
-        header_layout.addWidget(btn_add)
+        self.header_add_btn = btn_add
+        self._reflow_header()
         main.addWidget(self.header_frame)
 
         header_shadow = QGraphicsDropShadowEffect(self.header_frame)
@@ -664,16 +760,18 @@ class TasksPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("""
             QScrollArea { border: none; background: transparent; }
-            QScrollBar:horizontal { height: 10px; background: rgba(15, 23, 42, 0.08); border-radius: 5px; }
-            QScrollBar::handle:horizontal { background: rgba(48, 120, 205, 0.35); border-radius: 5px; }
-            QScrollBar::handle:horizontal:hover { background: rgba(48, 120, 205, 0.55); }
+            QScrollBar:horizontal { height: 10px; background: rgba(15, 23, 42, 20); border-radius: 5px; }
+            QScrollBar::handle:horizontal { background: rgba(48, 120, 205, 89); border-radius: 5px; }
+            QScrollBar::handle:horizontal:hover { background: rgba(48, 120, 205, 140); }
         """)
+        self.scroll = scroll
 
         container = QWidget()
         container.setStyleSheet("background: transparent;")
-        self.columns_layout = QHBoxLayout(container)
+        self.columns_layout = QGridLayout(container)
         self.columns_layout.setSpacing(12)
-        self.columns_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.columns_layout.setContentsMargins(0, 0, 0, 0)
+        self.columns_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll.setWidget(container)
         main.addWidget(scroll)
@@ -688,39 +786,85 @@ class TasksPage(QWidget):
 
     def showEvent(self, event):
         self.refresh_tasks()
+        self._reflow_header()
+        self._sync_column_title_sizes()
         super().showEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow_columns()
+        self._reflow_header()
+        self._sync_column_title_sizes()
+
+    def _sync_column_title_sizes(self):
+        if not self.columns:
+            return
+        min_available = None
+        for col in self.columns:
+            try:
+                available = col._title_available_width()
+            except Exception:
+                continue
+            if available > 0 and (min_available is None or available < min_available):
+                min_available = available
+        if not min_available:
+            return
+
+        sample_col = self.columns[0]
+        base_size = max(sample_col._label_min_size, min(sample_col._label_base_size, int(round(min_available / 18))))
+        sizes = []
+        for col in self.columns:
+            try:
+                sizes.append(col._fit_size_for_text(base_size))
+            except Exception:
+                pass
+        if not sizes:
+            return
+        target_size = min(sizes)
+        for col in self.columns:
+            try:
+                col.apply_title_font_size(target_size)
+            except Exception:
+                pass
 
     # --- THEME MANAGER ---
     def update_theme(self, theme):
         self.current_theme = theme
+        colors = get_theme(theme)
         if theme == "Dark":
-            self.setStyleSheet(
-                "QWidget { font-family: 'Poppins', 'Segoe UI', 'Arial'; }"
-                "QWidget#TasksPage { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0f2238, stop:1 #183151); }"
-            )
-            self.header_frame.setStyleSheet(
-                "QFrame#TasksHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #162b45, stop:1 #0f2238); "
-                "border: 1px solid #25456B; border-radius: 18px; }"
-            )
-            self.welcome.setStyleSheet("font-size: 11px; font-weight: 800; color: #BAD2E0; background: transparent; border: none;")
-            self.title.setStyleSheet("font-size: 34px; font-weight: 900; color: #F8F6F2; background: transparent; border: none;")
-            self.subtitle.setStyleSheet("font-size: 13px; font-weight: 600; color: #AFC4D8; background: transparent; border: none;")
-            self.chip_total.setStyleSheet("background: #0f2238; color: #F8F6F2; border: 1px solid #25456B; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;")
-            self.chip_due.setStyleSheet("background: #0f2238; color: #82AFF2; border: 1px solid #25456B; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;")
+            page_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['bg']}, stop:1 {colors['card_alt']})"
+            header_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card_alt']}, stop:1 {colors['bg']})"
+            chip_bg = colors["card_alt"]
+            chip_border = colors["border"]
+            chip_total_color = colors["text"]
+            chip_due_color = colors["accent"]
         else:
-            self.setStyleSheet(
-                "QWidget { font-family: 'Poppins', 'Segoe UI', 'Arial'; }"
-                "QWidget#TasksPage { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F4F7FB, stop:1 #E5EEF7); }"
-            )
-            self.header_frame.setStyleSheet(
-                "QFrame#TasksHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFFFFF, stop:1 #EFF5FB); "
-                "border: 1px solid #D7E3EE; border-radius: 18px; }"
-            )
-            self.welcome.setStyleSheet("font-size: 11px; font-weight: 800; color: #3078CD; background: transparent; border: none;")
-            self.title.setStyleSheet("font-size: 34px; font-weight: 900; color: #113356; background: transparent; border: none;")
-            self.subtitle.setStyleSheet("font-size: 13px; font-weight: 600; color: #47617c; background: transparent; border: none;")
-            self.chip_total.setStyleSheet("background: #FFFFFF; color: #113356; border: 1px solid #D7E3EE; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;")
-            self.chip_due.setStyleSheet("background: #EFF5FB; color: #25456B; border: 1px solid #D7E3EE; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;")
+            page_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['bg']}, stop:1 {colors['accent_soft']})"
+            header_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card']}, stop:1 {colors['accent_soft']})"
+            chip_bg = colors["card"]
+            chip_border = colors["border"]
+            chip_total_color = colors["text"]
+            chip_due_color = colors["deep"]
+
+        self.setStyleSheet(
+            "QWidget { font-family: '%s', 'Segoe UI'; }"
+            "QWidget#TasksPage { background: %s; }" % (FONT_FAMILY, page_bg)
+        )
+        self.header_frame.setStyleSheet(
+            "QFrame#TasksHeader { background: %s; border: 1px solid %s; border-radius: 18px; }" %
+            (header_bg, colors["border"])
+        )
+        self.welcome.setStyleSheet(f"font-size: 11px; font-weight: 800; color: {colors['accent']}; background: transparent; border: none;")
+        self.title.setStyleSheet(f"font-size: 34px; font-weight: 900; color: {colors['text']}; background: transparent; border: none;")
+        self.subtitle.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {colors['sub']}; background: transparent; border: none;")
+        self.chip_total.setStyleSheet(
+            "background: %s; color: %s; border: 1px solid %s; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;" %
+            (chip_bg, chip_total_color, chip_border)
+        )
+        self.chip_due.setStyleSheet(
+            "background: %s; color: %s; border: 1px solid %s; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;" %
+            (chip_bg, chip_due_color, chip_border)
+        )
 
         for col in self.columns:
             col.update_theme(theme)
@@ -756,16 +900,17 @@ class TasksPage(QWidget):
     def _style_empty_state(self):
         if not self.empty_state:
             return
+        colors = get_theme(self.current_theme)
         if self.current_theme == "Dark":
-            bg = "rgba(15, 34, 56, 0.7)"
-            border = "#25456B"
-            title_color = "#F8F6F2"
-            sub_color = "#AFC4D8"
+            bg = rgba(colors["card_alt"], 0.75)
+            border = colors["border"]
+            title_color = colors["text"]
+            sub_color = colors["sub"]
         else:
-            bg = "rgba(255, 255, 255, 0.85)"
-            border = "#D7E3EE"
-            title_color = "#113356"
-            sub_color = "#47617c"
+            bg = rgba(colors["card"], 0.9)
+            border = colors["border"]
+            title_color = colors["text"]
+            sub_color = colors["sub"]
 
         self.empty_state.setStyleSheet(
             f"QFrame#EmptyState {{ background: {bg}; border: 1px dashed {border}; border-radius: 22px; }}"
@@ -796,6 +941,23 @@ class TasksPage(QWidget):
     # --- Actions ---
     def prompt_new_task(self):
         dlg = AddTaskDialog(self, theme=self.current_theme)
+        default_important = False
+        settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+        try:
+            if os.path.exists(settings_path):
+                with open(settings_path, "r") as f:
+                    data = json.load(f)
+                    if "default_important" in data:
+                        default_important = bool(data.get("default_important", False))
+                    else:
+                        prio = str(data.get("default_priority", "")).strip().lower()
+                        default_important = prio in ("high", "medium")
+        except Exception:
+            default_important = False
+        try:
+            dlg.important_check.setChecked(default_important)
+        except Exception:
+            pass
         if dlg.exec():
             data = dlg.get_data()
             if data['title']:
@@ -875,14 +1037,8 @@ class TasksPage(QWidget):
         row = conn.execute("SELECT title, description, due_date, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
         conn.close()
         if row:
-            urg, imp = row[3], row[4]
-            if urg and imp: prio = "high"
-            elif not urg and imp: prio = "medium"
-            elif urg and not imp: prio = "low"
-            else: prio = "too low"
-
             dlg = AddTaskDialog(self, "Edit Task", theme=self.current_theme)
-            dlg.load_data(row[0], row[1], row[2], prio)
+            dlg.load_data(row[0], row[1], row[2], row[4])
             if dlg.exec():
                 data = dlg.get_data()
                 self.update_task_in_db(t_id, data)
@@ -925,24 +1081,39 @@ class TasksPage(QWidget):
             pass
 
     # --- Helpers BDD ---
+    def _deadline_is_urgent(self, due_date_str):
+        if not due_date_str:
+            return 0
+        try:
+            due = QDate.fromString(due_date_str, "yyyy-MM-dd")
+        except Exception:
+            return 0
+        if not due.isValid():
+            return 0
+        today = QDate.currentDate()
+        days_to = today.daysTo(due)
+        return 1 if days_to <= 2 else 0
+
     def save_task_to_db(self, data):
-        is_urg = 1 if data["priority"] in ['high', 'low'] else 0
-        is_imp = 1 if data["priority"] in ['high', 'medium'] else 0
+        is_imp = 1 if data.get("important") else 0
+        is_urg = self._deadline_is_urgent(data.get("date"))
+        prio = quadrant_from_flags(is_urg, is_imp)
 
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
         conn = self.get_db_connection()
         conn.execute("INSERT INTO tasks (title, description, due_date, created_date, priority, is_urgent, is_important, is_completed) VALUES (?,?,?,?,?,?,?,0)",
-                     (data['title'], data['description'], data['date'], today_str, data['priority'], is_urg, is_imp))
+                     (data['title'], data['description'], data['date'], today_str, prio, is_urg, is_imp))
         conn.commit()
         conn.close()
 
     def update_task_in_db(self, t_id, data):
-        is_urg = 1 if data["priority"] in ['high', 'low'] else 0
-        is_imp = 1 if data["priority"] in ['high', 'medium'] else 0
+        is_imp = 1 if data.get("important") else 0
+        is_urg = self._deadline_is_urgent(data.get("date"))
+        prio = quadrant_from_flags(is_urg, is_imp)
 
         conn = self.get_db_connection()
         conn.execute("UPDATE tasks SET title=?, description=?, due_date=?, priority=?, is_urgent=?, is_important=? WHERE id=?",
-                     (data['title'], data['description'], data['date'], data['priority'], is_urg, is_imp, t_id))
+                     (data['title'], data['description'], data['date'], prio, is_urg, is_imp, t_id))
         conn.commit()
         conn.close()
 
@@ -970,14 +1141,17 @@ class TasksPage(QWidget):
 
             if show_completed:
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important FROM tasks ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important, is_completed FROM tasks ORDER BY due_date"
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important FROM tasks WHERE is_completed=0 ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important, is_completed FROM tasks WHERE is_completed=0 ORDER BY due_date"
                 ).fetchall()
             focus_rows = conn.execute(
-                "SELECT task_id, COALESCE(SUM(duration_min), 0) FROM pomodoro_sessions WHERE status='completed' GROUP BY task_id"
+                "SELECT task_id, COALESCE(SUM(duration_min), 0) "
+                "FROM pomodoro_sessions "
+                "WHERE status IN ('completed', 'stopped') "
+                "GROUP BY task_id"
             ).fetchall()
         except:
             rows = []
@@ -994,19 +1168,15 @@ class TasksPage(QWidget):
 
         if total_tasks == 0:
             empty = self._build_empty_state()
-            self.columns_layout.addWidget(empty)
-            self.columns_layout.addStretch()
+            self.columns_layout.addWidget(empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop)
             self.chip_total.setText("0 tasks")
             self.chip_due.setText("0 due today")
             return
 
         for row in rows:
-            t_id, title, desc, due_date_str, created_date_str, urg, imp = row
+            t_id, title, desc, due_date_str, created_date_str, urg, imp, is_completed = row
 
-            if urg == 1 and imp == 1: priority = "high"
-            elif urg == 0 and imp == 1: priority = "medium"
-            elif urg == 1 and imp == 0: priority = "low"
-            else: priority = "too low"
+            priority = quadrant_from_flags(urg, imp)
 
             if not due_date_str: pretty_due = "No Deadline"
             else: pretty_due = QDate.fromString(due_date_str, "yyyy-MM-dd").toString("dddd d MMMM yyyy")
@@ -1020,18 +1190,65 @@ class TasksPage(QWidget):
             if pretty_due not in map_cols:
                 is_today = (due_date_str == today_str)
                 col = DayColumn(pretty_due, is_today, theme=self.current_theme)
-                self.columns_layout.addWidget(col)
                 map_cols[pretty_due] = col
                 self.columns.append(col)
 
             focus_minutes = focus_map.get(t_id, 0)
-            card = TaskCard(t_id, title, desc, pretty_due, pretty_created, priority, focus_minutes, self)
+            card = TaskCard(t_id, title, desc, pretty_due, pretty_created, priority, focus_minutes, self, is_completed)
             card.update_theme(self.current_theme)
             map_cols[pretty_due].add_task_card(card)
 
-        self.columns_layout.addStretch()
+        self._reflow_columns()
         self.chip_total.setText(f"{total_tasks} tasks")
         self.chip_due.setText(f"{due_today} due today")
+
+    def _reflow_columns(self):
+        if not hasattr(self, "columns_layout") or not self.columns:
+            return
+        layout = self.columns_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() and item.widget() not in self.columns:
+                item.widget().deleteLater()
+
+        try:
+            available = self.scroll.viewport().width()
+        except Exception:
+            available = self.width()
+        margins = layout.contentsMargins()
+        available = max(1, available - margins.left() - margins.right())
+        spacing = layout.spacing()
+        min_col_width = 280
+        cols_per_row = max(1, int((available + spacing) // (min_col_width + spacing)))
+
+        for idx, col in enumerate(self.columns):
+            row = idx // cols_per_row
+            col_idx = idx % cols_per_row
+            layout.addWidget(col, row, col_idx)
+
+        for col_idx in range(cols_per_row):
+            layout.setColumnStretch(col_idx, 1)
+        self._sync_column_title_sizes()
+
+    def _reflow_header(self):
+        if not hasattr(self, "header_layout"):
+            return
+        layout = self.header_layout
+        while layout.count():
+            layout.takeAt(0)
+        width = self.header_frame.width() if hasattr(self, "header_frame") else self.width()
+        narrow = width < 760
+
+        if narrow:
+            layout.addLayout(self.header_text_layout, 0, 0, 1, 2)
+            layout.addWidget(self.header_add_btn, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
+            layout.addLayout(self.header_chips_layout, 1, 1, alignment=Qt.AlignmentFlag.AlignRight)
+            layout.setColumnStretch(0, 1)
+        else:
+            layout.addLayout(self.header_text_layout, 0, 0)
+            layout.addLayout(self.header_chips_layout, 0, 1, alignment=Qt.AlignmentFlag.AlignRight)
+            layout.addWidget(self.header_add_btn, 0, 2, alignment=Qt.AlignmentFlag.AlignRight)
+            layout.setColumnStretch(0, 1)
 
     # --- REMINDER HELPERS ---
     def _ensure_tray(self):
@@ -1153,5 +1370,6 @@ class TasksPage(QWidget):
             except Exception:
                 continue
 
-    def start_pomodoro(self, t_id, title):
-        self.pomodoro_requested.emit(t_id, title)
+    def start_pomodoro(self, t_id, title, priority=None):
+        prio = normalize_priority(priority) or "too low"
+        self.pomodoro_requested.emit(t_id, title, prio)

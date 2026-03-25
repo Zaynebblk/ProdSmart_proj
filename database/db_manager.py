@@ -37,6 +37,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER,
             task_title TEXT,
+            task_priority TEXT,
             started_at TEXT,
             ended_at TEXT,
             duration_min INTEGER,
@@ -49,6 +50,10 @@ def init_db():
         pass
     try:
         cursor.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE pomodoro_sessions ADD COLUMN task_priority TEXT")
     except sqlite3.OperationalError:
         pass
     conn.commit()

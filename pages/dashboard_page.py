@@ -16,6 +16,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt6.QtGui import QPainter, QPainterPath, QPen, QLinearGradient, QColor
 from database.db_manager import get_db_connection
+from resources.theme import get_theme, FONT_FAMILY
+from resources.priority import (
+    normalize_priority,
+    priority_weight,
+    quadrant_from_flags,
+    PRIORITY_LEVELS,
+)
 
 
 def _heatmap_time_labels_2h():
@@ -53,81 +60,84 @@ class FocusConsistencyChart(QFrame):
         self.update()
 
     def paintEvent(self, event):
-        if not self.values:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            if not self.values:
+                return
 
-        rect = QRectF(self.rect())
-        left_pad = 12
-        right_pad = 12
-        top_pad = 12
-        bottom_pad = 28
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            rect = QRectF(self.rect())
+            left_pad = 12
+            right_pad = 12
+            top_pad = 12
+            bottom_pad = 28
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        values = list(self.values)
-        max_val = max(values) if values else 1
-        if max_val <= 0:
-            max_val = 1
-        if max_val > 1:
-            values = [v / max_val for v in values]
+            values = list(self.values)
+            max_val = max(values) if values else 1
+            if max_val <= 0:
+                max_val = 1
+            if max_val > 1:
+                values = [v / max_val for v in values]
 
-        points = []
-        span = 6 if len(values) > 1 else 1
-        for idx, value in enumerate(values):
-            x = chart_rect.left() + (chart_rect.width() / span) * idx
-            y = chart_rect.bottom() - (value * chart_rect.height())
-            points.append(QPointF(x, y))
+            points = []
+            span = 6 if len(values) > 1 else 1
+            for idx, value in enumerate(values):
+                x = chart_rect.left() + (chart_rect.width() / span) * idx
+                y = chart_rect.bottom() - (value * chart_rect.height())
+                points.append(QPointF(x, y))
 
-        path = QPainterPath()
-        path.moveTo(points[0])
-        for i in range(1, len(points)):
-            path.lineTo(points[i])
+            path = QPainterPath()
+            path.moveTo(points[0])
+            for i in range(1, len(points)):
+                path.lineTo(points[i])
 
-        fill_path = QPainterPath(path)
-        fill_path.lineTo(chart_rect.right(), chart_rect.bottom())
-        fill_path.lineTo(chart_rect.left(), chart_rect.bottom())
-        fill_path.closeSubpath()
+            fill_path = QPainterPath(path)
+            fill_path.lineTo(chart_rect.right(), chart_rect.bottom())
+            fill_path.lineTo(chart_rect.left(), chart_rect.bottom())
+            fill_path.closeSubpath()
 
-        line_color = QColor(self.colors.get("accent", "#38BDF8"))
-        gradient = QLinearGradient(chart_rect.topLeft(), chart_rect.bottomLeft())
-        gradient.setColorAt(0, QColor(line_color.red(), line_color.green(), line_color.blue(), 110))
-        gradient.setColorAt(1, QColor(line_color.red(), line_color.green(), line_color.blue(), 0))
+            line_color = QColor(self.colors.get("accent", "#38BDF8"))
+            gradient = QLinearGradient(chart_rect.topLeft(), chart_rect.bottomLeft())
+            gradient.setColorAt(0, QColor(line_color.red(), line_color.green(), line_color.blue(), 110))
+            gradient.setColorAt(1, QColor(line_color.red(), line_color.green(), line_color.blue(), 0))
 
-        painter.fillPath(fill_path, gradient)
+            painter.fillPath(fill_path, gradient)
 
-        pen = QPen(line_color, 4)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawPath(path)
+            pen = QPen(line_color, 4)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(path)
 
-        # Markers per day (to show exact zeros)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(line_color)
-        for pt in points:
-            painter.drawEllipse(pt, 4, 4)
+            # Markers per day (to show exact zeros)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(line_color)
+            for pt in points:
+                painter.drawEllipse(pt, 4, 4)
 
-        label_color = QColor(self.colors.get("sub", "#94A3B8"))
-        painter.setPen(label_color)
-        font = painter.font()
-        font.setPointSize(9)
-        font.setBold(True)
-        painter.setFont(font)
+            label_color = QColor(self.colors.get("sub", "#94A3B8"))
+            painter.setPen(label_color)
+            font = painter.font()
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
 
-        for idx, label in enumerate(self.labels):
-            if not label:
-                continue
-            metrics = painter.fontMetrics()
-            text_width = metrics.horizontalAdvance(label)
-            x = points[idx].x() - text_width / 2
-            y = rect.bottom() - 6
-            painter.drawText(QPointF(x, y), label)
+            for idx, label in enumerate(self.labels):
+                if not label:
+                    continue
+                metrics = painter.fontMetrics()
+                text_width = metrics.horizontalAdvance(label)
+                x = points[idx].x() - text_width / 2
+                y = rect.bottom() - 6
+                painter.drawText(QPointF(x, y), label)
+        finally:
+            painter.end()
 
 
 class HeatmapWidget(QFrame):
@@ -157,107 +167,147 @@ class HeatmapWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rows = len(self.values)
+            cols = len(self.values[0]) if rows else 0
+            if rows == 0 or cols == 0:
+                return
 
-        rows = len(self.values)
-        cols = len(self.values[0]) if rows else 0
-        if rows == 0 or cols == 0:
-            return
+            rect = QRectF(self.rect())
+            right_pad = 16
+            top_pad = 24
+            bottom_pad = 34
+            legend_height = 18
 
-        rect = QRectF(self.rect())
-        right_pad = 16
-        top_pad = 24
-        bottom_pad = 34
-        legend_height = 18
+            label_color = QColor(self.colors.get("sub", "#94A3B8"))
+            label_font = painter.font()
+            label_font.setPointSize(9)
+            label_font.setBold(True)
 
-        label_color = QColor(self.colors.get("sub", "#94A3B8"))
-        label_font = painter.font()
-        label_font.setPointSize(9)
-        label_font.setBold(True)
+            day_font = painter.font()
+            day_font.setPointSize(10)
+            day_font.setBold(True)
 
-        day_font = painter.font()
-        day_font.setPointSize(10)
-        day_font.setBold(True)
-
-        painter.setFont(day_font)
-        metrics = painter.fontMetrics()
-        max_day_label_w = max(
-            (metrics.horizontalAdvance(label) for label in self.day_labels[:rows] if label),
-            default=0
-        )
-        label_gap = 10
-        left_pad = max(28, max_day_label_w + label_gap + 2)
-
-        grid_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
-
-        gap = 8
-        cell_w = (grid_rect.width() - gap * (cols - 1)) / cols
-        cell_h = (grid_rect.height() - gap * (rows - 1)) / rows
-
-        painter.setPen(label_color)
-        painter.setFont(label_font)
-
-        # Time labels
-        for c, label in enumerate(self.time_labels[:cols]):
-            text_width = painter.fontMetrics().horizontalAdvance(label)
-            x = grid_rect.left() + c * (cell_w + gap) + (cell_w - text_width) / 2
-            y = rect.top() + 16
-            painter.drawText(QPointF(x, y), label)
-
-        # Day labels
-        day_label_color = QColor(self.colors.get("text", "#0B132B"))
-        painter.setPen(day_label_color)
-        painter.setFont(day_font)
-        for r, label in enumerate(self.day_labels[:rows]):
-            label_rect = QRectF(
-                rect.left(),
-                grid_rect.top() + r * (cell_h + gap),
-                left_pad - label_gap,
-                cell_h
+            painter.setFont(day_font)
+            metrics = painter.fontMetrics()
+            max_day_label_w = max(
+                (metrics.horizontalAdvance(label) for label in self.day_labels[:rows] if label),
+                default=0
             )
-            painter.drawText(
-                label_rect,
-                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
-                label
+            label_gap = 10
+            left_pad = max(28, max_day_label_w + label_gap + 2)
+
+            grid_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
             )
 
-        heat_colors = [
-            QColor(self.colors.get("heat0", "#1F2937")),
-            QColor(self.colors.get("heat1", "#0B4A6E")),
-            QColor(self.colors.get("heat2", "#0284C7")),
-            QColor(self.colors.get("heat3", "#38BDF8")),
-        ]
+            gap = 8
+            cell_w = (grid_rect.width() - gap * (cols - 1)) / cols
+            cell_h = (grid_rect.height() - gap * (rows - 1)) / rows
 
-        for r in range(rows):
-            for c in range(cols):
-                value = self.values[r][c]
-                color = heat_colors[max(0, min(value, 3))]
-                x = grid_rect.left() + c * (cell_w + gap)
-                y = grid_rect.top() + r * (cell_h + gap)
-                cell_rect = QRectF(x, y, cell_w, cell_h)
-                painter.setPen(Qt.PenStyle.NoPen)
+            painter.setPen(label_color)
+            label_step = 1
+            if cell_w < 60:
+                label_step = 2
+            if cell_w < 42:
+                label_step = 3
+            if cell_w < 30:
+                label_step = 4
+            if cell_w < 44:
+                label_font.setPointSize(8)
+            if cell_w < 32:
+                label_font.setPointSize(7)
+            painter.setFont(label_font)
+
+            use_labels = self.time_labels
+            if cell_w < 70:
+                short_labels = []
+                for label in self.time_labels:
+                    parts = label.split("-")
+                    if len(parts) == 2:
+                        start = parts[0][:2]
+                        end = parts[1][:2]
+                        short_labels.append(f"{start}-{end}")
+                    else:
+                        short_labels.append(label)
+                use_labels = short_labels
+            if cell_w < 50:
+                tiny_labels = []
+                for label in self.time_labels:
+                    parts = label.split("-")
+                    if parts:
+                        tiny_labels.append(parts[0][:2])
+                    else:
+                        tiny_labels.append(label)
+                use_labels = tiny_labels
+
+            # Time labels
+            for c, label in enumerate(use_labels[:cols]):
+                if label_step > 1 and (c % label_step) != 0:
+                    continue
+                text_width = painter.fontMetrics().horizontalAdvance(label)
+                x = grid_rect.left() + c * (cell_w + gap) + (cell_w - text_width) / 2
+                y = rect.top() + 16
+                painter.drawText(QPointF(x, y), label)
+
+            # Day labels
+            day_label_color = QColor(self.colors.get("text", "#0B132B"))
+            painter.setPen(day_label_color)
+            painter.setFont(day_font)
+            for r, label in enumerate(self.day_labels[:rows]):
+                label_rect = QRectF(
+                    rect.left(),
+                    grid_rect.top() + r * (cell_h + gap),
+                    left_pad - label_gap,
+                    cell_h
+                )
+                painter.drawText(
+                    label_rect,
+                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                    label
+                )
+
+            heat_colors = [
+                QColor(self.colors.get("heat0", "#1F2937")),
+                QColor(self.colors.get("heat1", "#0B4A6E")),
+                QColor(self.colors.get("heat2", "#0284C7")),
+                QColor(self.colors.get("heat3", "#38BDF8")),
+            ]
+
+            for r in range(rows):
+                for c in range(cols):
+                    value = self.values[r][c]
+                    color = heat_colors[max(0, min(value, 3))]
+                    x = grid_rect.left() + c * (cell_w + gap)
+                    y = grid_rect.top() + r * (cell_h + gap)
+                    cell_rect = QRectF(x, y, cell_w, cell_h)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(color)
+                    painter.drawRoundedRect(cell_rect, 6, 6)
+
+            # Legend
+            legend_y = rect.bottom() - legend_height
+            painter.setPen(label_color)
+            painter.drawText(QPointF(rect.left() + left_pad - 12, legend_y + 12), "Lower priority focus")
+
+            legend_x = rect.left() + left_pad + 120
+            box_size = 12
+            for idx, color in enumerate(heat_colors):
+                box_rect = QRectF(legend_x + idx * (box_size + 6), legend_y, box_size, box_size)
                 painter.setBrush(color)
-                painter.drawRoundedRect(cell_rect, 6, 6)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(box_rect, 3, 3)
 
-        # Legend
-        legend_y = rect.bottom() - legend_height
-        painter.setPen(label_color)
-        painter.drawText(QPointF(rect.left() + left_pad - 12, legend_y + 12), "Less productive")
-
-        legend_x = rect.left() + left_pad + 120
-        box_size = 12
-        for idx, color in enumerate(heat_colors):
-            box_rect = QRectF(legend_x + idx * (box_size + 6), legend_y, box_size, box_size)
-            painter.setBrush(color)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(box_rect, 3, 3)
-
-        painter.setPen(label_color)
-        painter.drawText(QPointF(legend_x + len(heat_colors) * (box_size + 6) + 8, legend_y + 12), "Peak Flow")
+            painter.setPen(label_color)
+            painter.drawText(
+                QPointF(legend_x + len(heat_colors) * (box_size + 6) + 8, legend_y + 12),
+                "Higher priority focus"
+            )
+        finally:
+            painter.end()
 
 
 class VelocityChartWidget(QFrame):
@@ -294,80 +344,110 @@ class VelocityChartWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 36
+            right_pad = 16
+            top_pad = 18
+            bottom_pad = 34
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        rect = QRectF(self.rect())
-        left_pad = 20
-        right_pad = 16
-        top_pad = 18
-        bottom_pad = 34
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            max_val = max(max(self.counts), max(self.capacity), self.point_value, 1)
 
-        max_val = max(max(self.counts), max(self.capacity), self.point_value, 1)
+            grid_color = QColor(self.colors.get("chart_grid", "#1F2937"))
+            painter.setPen(QPen(grid_color, 1))
+            for i in range(3):
+                y = chart_rect.top() + (chart_rect.height() / 2) * i
+                painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
 
-        grid_color = QColor(self.colors.get("chart_grid", "#1F2937"))
-        painter.setPen(QPen(grid_color, 1))
-        for i in range(3):
-            y = chart_rect.top() + (chart_rect.height() / 2) * i
-            painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
+            # Y-axis labels (max, mid, zero)
+            label_color = QColor(self.colors.get("sub", "#94A3B8"))
+            painter.setPen(label_color)
+            font = painter.font()
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            tick_values = [max_val, max_val / 2, 0]
+            for i, value in enumerate(tick_values):
+                display = value
+                if isinstance(display, float) and display.is_integer():
+                    display = int(display)
+                label = f"{display}"
+                y = chart_rect.top() + (chart_rect.height() / 2) * i
+                text_width = metrics.horizontalAdvance(label)
+                text_x = rect.left() + max(0, left_pad - text_width - 6)
+                text_y = y + metrics.ascent() / 2
+                painter.drawText(QPointF(text_x, text_y), label)
 
-        def to_point(idx, value):
-            x = chart_rect.left() + (chart_rect.width() / 6) * idx
-            y = chart_rect.bottom() - (value / max_val) * chart_rect.height()
-            return QPointF(x, y)
+            def to_point(idx, value):
+                x = chart_rect.left() + (chart_rect.width() / 6) * idx
+                y = chart_rect.bottom() - (value / max_val) * chart_rect.height()
+                return QPointF(x, y)
 
-        capacity_color = QColor(self.colors.get("capacity", "#A855F7"))
-        cap_pen = QPen(capacity_color, 3, Qt.PenStyle.DotLine)
-        cap_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(cap_pen)
+            # Actual line (daily sessions)
+            actual_color = QColor(self.colors.get("accent", "#38BDF8"))
+            actual_pen = QPen(actual_color, 3)
+            actual_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            actual_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(actual_pen)
 
-        cap_path = QPainterPath()
-        cap_points = [to_point(i, v) for i, v in enumerate(self.capacity)]
-        cap_path.moveTo(cap_points[0])
-        for i in range(1, len(cap_points)):
-            cap_path.lineTo(cap_points[i])
-        painter.drawPath(cap_path)
+            actual_path = QPainterPath()
+            actual_points = [to_point(i, v) for i, v in enumerate(self.counts)]
+            actual_path.moveTo(actual_points[0])
+            for i in range(1, len(actual_points)):
+                actual_path.lineTo(actual_points[i])
+            painter.drawPath(actual_path)
 
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(capacity_color)
-        for pt in cap_points:
-            painter.drawEllipse(pt, 4, 4)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(actual_color)
+            for pt in actual_points:
+                painter.drawEllipse(pt, 4, 4)
 
-        point_color = QColor(self.colors.get("accent", "#38BDF8"))
-        point_y = chart_rect.bottom() - (self.point_value / max_val) * chart_rect.height() if max_val else chart_rect.bottom()
-        painter.setPen(QPen(point_color, 2))
-        painter.drawLine(QPointF(chart_rect.left(), point_y), QPointF(chart_rect.right(), point_y))
+            # Average line (7-day avg)
+            avg_color = QColor(self.colors.get("capacity", self.colors.get("sub", "#94A3B8")))
+            avg_pen = QPen(avg_color, 2, Qt.PenStyle.DotLine)
+            avg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(avg_pen)
 
-        marker = QPointF(
-            chart_rect.left() + (chart_rect.width() / 6) * self.point_index,
-            point_y
-        )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(point_color)
-        painter.drawEllipse(marker, 5, 5)
+            avg_path = QPainterPath()
+            avg_points = [to_point(i, v) for i, v in enumerate(self.capacity)]
+            avg_path.moveTo(avg_points[0])
+            for i in range(1, len(avg_points)):
+                avg_path.lineTo(avg_points[i])
+            painter.drawPath(avg_path)
 
-        painter.setPen(point_color)
-        font = painter.font()
-        font.setPointSize(10)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(QPointF(marker.x() - 6, point_y - 8), f"{self.point_value}")
+            if self.point_value:
+                painter.setPen(avg_color)
+                font = painter.font()
+                font.setPointSize(9)
+                font.setBold(True)
+                painter.setFont(font)
+                avg_value = self.point_value
+                if isinstance(avg_value, float) and avg_value.is_integer():
+                    avg_value = int(avg_value)
+                avg_text = f"Avg {avg_value}"
+                metrics = painter.fontMetrics()
+                text_width = metrics.horizontalAdvance(avg_text)
+                avg_y = chart_rect.bottom() - (self.point_value / max_val) * chart_rect.height()
+                x = chart_rect.right() - text_width
+                y = max(chart_rect.top() + 10, min(chart_rect.bottom() - 4, avg_y - 6))
+                painter.drawText(QPointF(x, y), avg_text)
 
-        label_color = QColor(self.colors.get("sub", "#94A3B8"))
-        painter.setPen(label_color)
-        font = painter.font()
-        font.setPointSize(9)
-        font.setBold(True)
-        painter.setFont(font)
-        for idx, label in enumerate(self.labels):
-            text_width = painter.fontMetrics().horizontalAdvance(label)
-            x = chart_rect.left() + (chart_rect.width() / 6) * idx - text_width / 2
-            y = rect.bottom() - 6
-            painter.drawText(QPointF(x, y), label)
+            painter.setPen(label_color)
+            painter.setFont(font)
+            for idx, label in enumerate(self.labels):
+                text_width = painter.fontMetrics().horizontalAdvance(label)
+                x = chart_rect.left() + (chart_rect.width() / 6) * idx - text_width / 2
+                y = rect.bottom() - 6
+                painter.drawText(QPointF(x, y), label)
+        finally:
+            painter.end()
 
 class PomodoroBarChart(QFrame):
     def __init__(self):
@@ -395,62 +475,179 @@ class PomodoroBarChart(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 16
+            right_pad = 16
+            top_pad = 12
+            bottom_pad = 26
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        rect = QRectF(self.rect())
-        left_pad = 16
-        right_pad = 16
-        top_pad = 12
-        bottom_pad = 26
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            values = list(self.values)
+            max_val = max(values) if values else 1
+            if max_val <= 0:
+                max_val = 1
 
-        values = list(self.values)
-        max_val = max(values) if values else 1
-        if max_val <= 0:
-            max_val = 1
+            bar_count = len(values)
+            gap = 8
+            bar_w = (chart_rect.width() - gap * (bar_count - 1)) / bar_count
 
-        bar_count = len(values)
-        gap = 8
-        bar_w = (chart_rect.width() - gap * (bar_count - 1)) / bar_count
+            accent = QColor(self.colors.get("accent", "#38BDF8"))
+            accent2 = QColor(self.colors.get("accent2", "#22D3EE"))
+            grid = QColor(self.colors.get("chart_grid", "#1F2937"))
 
-        accent = QColor(self.colors.get("accent", "#38BDF8"))
-        accent2 = QColor(self.colors.get("accent2", "#22D3EE"))
-        grid = QColor(self.colors.get("chart_grid", "#1F2937"))
+            painter.setPen(QPen(grid, 1))
+            for i in range(1, 3):
+                y = chart_rect.top() + (chart_rect.height() / 3) * i
+                painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
 
-        painter.setPen(QPen(grid, 1))
-        for i in range(1, 3):
-            y = chart_rect.top() + (chart_rect.height() / 3) * i
-            painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
+            for idx, value in enumerate(values):
+                x = chart_rect.left() + idx * (bar_w + gap)
+                h = (value / max_val) * chart_rect.height()
+                y = chart_rect.bottom() - h
+                gradient = QLinearGradient(QPointF(x, y), QPointF(x, chart_rect.bottom()))
+                gradient.setColorAt(0, accent2)
+                gradient.setColorAt(1, accent)
+                painter.setBrush(gradient)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(QRectF(x, y, bar_w, h), 6, 6)
 
-        for idx, value in enumerate(values):
-            x = chart_rect.left() + idx * (bar_w + gap)
-            h = (value / max_val) * chart_rect.height()
-            y = chart_rect.bottom() - h
-            gradient = QLinearGradient(QPointF(x, y), QPointF(x, chart_rect.bottom()))
-            gradient.setColorAt(0, accent2)
-            gradient.setColorAt(1, accent)
-            painter.setBrush(gradient)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(QRectF(x, y, bar_w, h), 6, 6)
+            label_color = QColor(self.colors.get("sub", "#94A3B8"))
+            painter.setPen(label_color)
+            font = painter.font()
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+            for idx, label in enumerate(self.labels):
+                if not label:
+                    continue
+                text_width = painter.fontMetrics().horizontalAdvance(label)
+                x = chart_rect.left() + idx * (bar_w + gap) + (bar_w - text_width) / 2
+                y = rect.bottom() - 6
+                painter.drawText(QPointF(x, y), label)
+        finally:
+            painter.end()
 
-        label_color = QColor(self.colors.get("sub", "#94A3B8"))
-        painter.setPen(label_color)
-        font = painter.font()
-        font.setPointSize(9)
-        font.setBold(True)
-        painter.setFont(font)
-        for idx, label in enumerate(self.labels):
-            if not label:
-                continue
-            text_width = painter.fontMetrics().horizontalAdvance(label)
-            x = chart_rect.left() + idx * (bar_w + gap) + (bar_w - text_width) / 2
-            y = rect.bottom() - 6
-            painter.drawText(QPointF(x, y), label)
 
+class PriorityBreakdownChart(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.values = {level: 0 for level in PRIORITY_LEVELS}
+        self.labels = ["High", "Medium", "Low", "Too Low"]
+        self.colors = {}
+        self.setMinimumHeight(170)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def set_data(self, values):
+        if values:
+            for level in PRIORITY_LEVELS:
+                self.values[level] = int(values.get(level, 0) or 0)
+        self.update()
+
+    def set_theme(self, colors, theme):
+        self.colors = colors or {}
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 90
+            right_pad = 20
+            top_pad = 16
+            row_gap = 14
+            bar_h = 16
+
+            values = [self.values.get(level, 0) for level in PRIORITY_LEVELS]
+            max_val = max(values) if values else 0
+
+            label_color = QColor(self.colors.get("text", "#0B132B"))
+            sub_color = QColor(self.colors.get("sub", "#94A3B8"))
+            painter.setPen(label_color)
+            font = painter.font()
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+
+            if max_val == 0:
+                painter.setPen(sub_color)
+                painter.drawText(QPointF(rect.left() + 10, rect.center().y()), "No priority sessions yet.")
+                return
+
+            color_map = {
+                "high": QColor(self.colors.get("bad", "#ef4444")),
+                "medium": QColor(self.colors.get("accent", "#3078CD")),
+                "low": QColor(self.colors.get("accent2", "#82AFF2")),
+                "too low": QColor(self.colors.get("border", "#94a3b8")),
+            }
+
+            value_font = painter.font()
+            value_font.setPointSize(10)
+            value_font.setBold(True)
+            painter.setFont(value_font)
+            metrics = painter.fontMetrics()
+            padding_x = 6
+            padding_y = 3
+            pill_gap = 12
+            right_margin = 10
+
+            max_pill_w = 0
+            for level in PRIORITY_LEVELS:
+                value = self.values.get(level, 0)
+                value_text = f"{value} min"
+                pill_w = metrics.horizontalAdvance(value_text) + padding_x * 2
+                if pill_w > max_pill_w:
+                    max_pill_w = pill_w
+
+            max_chart = rect.width() - left_pad - right_pad
+            reserve = max_pill_w + pill_gap + right_margin
+            chart_w = max_chart - reserve
+            if chart_w < 40:
+                chart_w = max(20, max_chart - right_margin)
+
+            for idx, level in enumerate(PRIORITY_LEVELS):
+                value = self.values.get(level, 0)
+                y = rect.top() + top_pad + idx * (bar_h + row_gap)
+                bar_w = 0 if max_val == 0 else (value / max_val) * chart_w
+                label = self.labels[idx]
+
+                painter.setPen(label_color)
+                painter.drawText(QPointF(rect.left() + 8, y + bar_h), label)
+
+                bar_rect = QRectF(rect.left() + left_pad, y, max(4, bar_w), bar_h)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color_map.get(level, sub_color))
+                painter.drawRoundedRect(bar_rect, 6, 6)
+
+                value_text = f"{value} min"
+                painter.setFont(value_font)
+                text_width = metrics.horizontalAdvance(value_text)
+                pill_w = text_width + padding_x * 2
+                pill_h = max(bar_h + 2, metrics.height() + padding_y * 2)
+                pill_y = y + (bar_h - pill_h) / 2
+                outside_x = rect.left() + left_pad + chart_w + pill_gap
+                max_outside = rect.right() - pill_w - 10
+                if outside_x > max_outside:
+                    outside_x = max_outside
+                pill_rect = QRectF(outside_x, pill_y, pill_w, pill_h)
+
+                pill_color = QColor(color_map.get(level, sub_color))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(pill_color)
+                painter.drawRoundedRect(pill_rect, 7, 7)
+
+                text_y = pill_y + (pill_h + metrics.ascent() - metrics.descent()) / 2
+                painter.setPen(QColor("#ffffff"))
+                painter.drawText(QPointF(outside_x + padding_x, text_y), value_text)
+        finally:
+            painter.end()
 class DashboardPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -482,6 +679,9 @@ class DashboardPage(QWidget):
         self.pomo_best_day_minutes = 0
         self.pomo_day_minutes = [0, 0, 0, 0, 0, 0, 0]
         self.pomo_day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        self.pomo_day_sessions = [0, 0, 0, 0, 0, 0, 0]
+        self.pomo_day_sessions = [0, 0, 0, 0, 0, 0, 0]
+        self.priority_chart = None
 
         self.setObjectName("DashboardPage")
         self._set_default_metrics()
@@ -496,14 +696,20 @@ class DashboardPage(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea QWidget { background: transparent; }"
+            "QScrollArea::viewport { background: transparent; }"
+        )
 
-        container = QWidget()
-        self.content = QVBoxLayout(container)
+        self.container = QWidget()
+        self.container.setObjectName("DashContainer")
+        self.container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.content = QVBoxLayout(self.container)
         self.content.setContentsMargins(32, 24, 32, 24)
         self.content.setSpacing(18)
 
-        self.scroll.setWidget(container)
+        self.scroll.setWidget(self.container)
         root.addWidget(self.scroll)
 
         # Header
@@ -549,8 +755,8 @@ class DashboardPage(QWidget):
         self.content.addWidget(header)
 
         # Top cards
-        top_row = QHBoxLayout()
-        top_row.setSpacing(14)
+        self.top_grid = QGridLayout()
+        self.top_grid.setSpacing(14)
 
         focus_card = self._make_card("Focus Score")
         focus_layout = focus_card.layout()
@@ -626,10 +832,9 @@ class DashboardPage(QWidget):
         pomodoro_layout.addWidget(self.pomo_best_label)
         pomodoro_layout.addStretch()
 
-        top_row.addWidget(focus_card)
-        top_row.addWidget(energy_card)
-        top_row.addWidget(pomodoro_card)
-        self.content.addLayout(top_row)
+        self._top_cards = [focus_card, energy_card, pomodoro_card]
+        self._layout_card_grid(self.top_grid, self._top_cards, min_width=240, max_cols=3)
+        self.content.addLayout(self.top_grid)
 
         # AI Insights
         ai_header = self._section_header("AI Insights")
@@ -647,6 +852,7 @@ class DashboardPage(QWidget):
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setFixedSize(110, 24)
         self.badges.append(badge)
+        self.ai_badge = badge
 
         title = QLabel("Best time for deep work")
         title.setObjectName("DashCardTitle")
@@ -658,6 +864,15 @@ class DashboardPage(QWidget):
         desc.setWordWrap(True)
         self.labels_sub.append(desc)
 
+        rec = QLabel("Recommendation: Start the day with a high-priority session.")
+        rec.setObjectName("DashReco")
+        rec.setWordWrap(True)
+        self.labels_sub.append(rec)
+
+        self.ai_primary_title = title
+        self.ai_primary_desc = desc
+        self.ai_reco_label = rec
+
         btn = QPushButton("Schedule Deep Work")
         btn.setObjectName("DashAction")
         btn.clicked.connect(self._on_schedule_clicked)
@@ -666,6 +881,7 @@ class DashboardPage(QWidget):
         primary_layout.addWidget(badge, alignment=Qt.AlignmentFlag.AlignLeft)
         primary_layout.addWidget(title)
         primary_layout.addWidget(desc)
+        primary_layout.addWidget(rec)
         primary_layout.addStretch()
         primary_layout.addWidget(btn)
 
@@ -688,6 +904,8 @@ class DashboardPage(QWidget):
         sec_desc = QLabel("Save inbox cleanup for 4:00 PM when energy dips.")
         sec_desc.setWordWrap(True)
         self.labels_sub.append(sec_desc)
+        self.ai_secondary_title = sec_title
+        self.ai_secondary_desc = sec_desc
         sec_text.addWidget(sec_title)
         sec_text.addWidget(sec_desc)
 
@@ -734,24 +952,25 @@ class DashboardPage(QWidget):
         self.consistency_chart = FocusConsistencyChart()
         consistency_layout.addWidget(self.consistency_chart)
 
-        heatmap = self._make_card("Productivity Heatmap")
+        heatmap = self._make_card("Priority Focus Heatmap")
         heatmap_layout = heatmap.layout()
         heatmap_layout.setSpacing(10)
 
         self.heatmap_chart = HeatmapWidget()
         heatmap_layout.addWidget(self.heatmap_chart)
 
-        velocity = self._make_card("Predicted Velocity")
+        velocity = self._make_card("Pomodoro Sessions (7-Day)")
         velocity_layout = velocity.layout()
         velocity_layout.setSpacing(10)
 
         self.velocity_chart = VelocityChartWidget()
         velocity_layout.addWidget(self.velocity_chart)
 
-        weekly_row = QHBoxLayout()
-        weekly_row.addWidget(completion)
-        weekly_row.addWidget(consistency)
-        self.content.addLayout(weekly_row)
+        self.weekly_grid = QGridLayout()
+        self.weekly_grid.setSpacing(14)
+        self._weekly_cards = [completion, consistency]
+        self._layout_card_grid(self.weekly_grid, self._weekly_cards, min_width=320, max_cols=2)
+        self.content.addLayout(self.weekly_grid)
 
         pomodoro_trend = self._make_card("Pomodoro Trend")
         pomodoro_trend_layout = pomodoro_trend.layout()
@@ -759,6 +978,13 @@ class DashboardPage(QWidget):
         self.pomo_chart = PomodoroBarChart()
         pomodoro_trend_layout.addWidget(self.pomo_chart)
         self.content.addWidget(pomodoro_trend)
+
+        priority_breakdown = self._make_card("Priority Breakdown")
+        priority_layout = priority_breakdown.layout()
+        priority_layout.setSpacing(10)
+        self.priority_chart = PriorityBreakdownChart()
+        priority_layout.addWidget(self.priority_chart)
+        self.content.addWidget(priority_breakdown)
 
         self.content.addWidget(heatmap)
         self.content.addWidget(velocity)
@@ -781,6 +1007,38 @@ class DashboardPage(QWidget):
 
         self.cards.append(card)
         return card
+
+    def _layout_card_grid(self, layout, widgets, min_width=260, max_cols=None):
+        if not layout:
+            return
+        while layout.count():
+            layout.takeAt(0)
+
+        try:
+            available = self.scroll.viewport().width()
+        except Exception:
+            available = self.width()
+        margins = self.content.contentsMargins()
+        available = max(1, available - margins.left() - margins.right())
+        spacing = layout.spacing()
+        cols = max(1, int((available + spacing) // (min_width + spacing)))
+        if max_cols:
+            cols = min(cols, max_cols)
+
+        for idx, widget in enumerate(widgets):
+            row = idx // cols
+            col = idx % cols
+            layout.addWidget(widget, row, col)
+
+        for col in range(cols):
+            layout.setColumnStretch(col, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "top_grid") and hasattr(self, "_top_cards"):
+            self._layout_card_grid(self.top_grid, self._top_cards, min_width=240, max_cols=3)
+        if hasattr(self, "weekly_grid") and hasattr(self, "_weekly_cards"):
+            self._layout_card_grid(self.weekly_grid, self._weekly_cards, min_width=320, max_cols=2)
 
     def _section_header(self, title_text):
         row = QHBoxLayout()
@@ -830,6 +1088,15 @@ class DashboardPage(QWidget):
         self.velocity_day_labels_data = ["M", "T", "W", "T", "F", "S", "S"]
         self.completion_value = 0
         self.completion_date = "No forecast"
+        self.priority_minutes_week = {level: 0 for level in PRIORITY_LEVELS}
+        self.priority_sessions_week = {level: 0 for level in PRIORITY_LEVELS}
+        self.ai_badge_text = "Recommended"
+        self.ai_action_text = "Schedule Deep Work"
+        self.ai_recommendation_text = "Start the day with a high-priority session."
+        self.ai_primary_title_text = "Priority focus score"
+        self.ai_primary_desc_text = "Add tasks to see weighted productivity insights."
+        self.ai_secondary_title_text = "Balance check"
+        self.ai_secondary_desc_text = "We will surface workload warnings here."
 
     def _apply_metrics(self):
         self.focus_score.setText(str(self.focus_value))
@@ -881,6 +1148,23 @@ class DashboardPage(QWidget):
             )
         if hasattr(self, "pomo_chart") and self.pomo_chart:
             self.pomo_chart.set_data(self.pomo_day_minutes, self.pomo_day_labels)
+        if hasattr(self, "priority_chart") and self.priority_chart:
+            self.priority_chart.set_data(self.priority_minutes_week)
+
+        if hasattr(self, "ai_primary_title"):
+            self.ai_primary_title.setText(self.ai_primary_title_text)
+        if hasattr(self, "ai_primary_desc"):
+            self.ai_primary_desc.setText(self.ai_primary_desc_text)
+        if hasattr(self, "ai_secondary_title"):
+            self.ai_secondary_title.setText(self.ai_secondary_title_text)
+        if hasattr(self, "ai_secondary_desc"):
+            self.ai_secondary_desc.setText(self.ai_secondary_desc_text)
+        if hasattr(self, "ai_reco_label"):
+            self.ai_reco_label.setText(self.ai_recommendation_text)
+        if hasattr(self, "ai_badge"):
+            self.ai_badge.setText(self.ai_badge_text)
+        if hasattr(self, "schedule_button"):
+            self.schedule_button.setText(self.ai_action_text)
 
         self._apply_dynamic_styles()
 
@@ -948,7 +1232,17 @@ class DashboardPage(QWidget):
                 self._set_status("No history yet")
                 return
             cols = {row[1] for row in info}
-            base_cols = ["id", "title", "priority", "created_date", "due_date", "is_completed", "completed_at"]
+            base_cols = [
+                "id",
+                "title",
+                "priority",
+                "created_date",
+                "due_date",
+                "is_completed",
+                "completed_at",
+                "is_urgent",
+                "is_important",
+            ]
             select_cols = [col for col in base_cols if col in cols]
             if not select_cols:
                 self._set_default_metrics()
@@ -986,7 +1280,16 @@ class DashboardPage(QWidget):
         created_dates = []
         completed_dates = []
         completed_times = []
+        completed_time_prios = []
+        completed_day_weights = {}
         completed_total = 0
+        priority_counts = {level: 0 for level in PRIORITY_LEVELS}
+        priority_completed = {level: 0 for level in PRIORITY_LEVELS}
+        weight_total = 0
+        weight_completed = 0
+        weight_completed_last7 = 0
+        weight_completed_prev7 = 0
+        tasks_by_id = {}
 
         for task in tasks:
             created_dt, _ = self._parse_date(task.get("created_date"))
@@ -995,17 +1298,43 @@ class DashboardPage(QWidget):
             if created_dt:
                 created_dates.append(created_dt.date())
 
+            completed_dt = None
+            completed_has_time = False
+            completed_day = None
             is_completed = int(task.get("is_completed") or 0) == 1
             if is_completed:
                 completed_total += 1
-                completed_dt, has_time = self._parse_date(task.get("completed_at"))
+                completed_dt, completed_has_time = self._parse_date(task.get("completed_at"))
                 if completed_dt:
                     completed_dates.append(completed_dt.date())
-                    if has_time:
+                    completed_day = completed_dt.date()
+                    if completed_has_time:
                         completed_times.append(completed_dt)
                 else:
                     if created_dt:
                         completed_dates.append(created_dt.date())
+                        completed_day = created_dt.date()
+
+            prio = normalize_priority(task.get("priority"))
+            if prio not in PRIORITY_LEVELS:
+                prio = quadrant_from_flags(task.get("is_urgent"), task.get("is_important"))
+            if prio not in PRIORITY_LEVELS:
+                prio = "too low"
+            tasks_by_id[task.get("id")] = prio
+            priority_counts[prio] += 1
+            weight = priority_weight(prio)
+            weight_total += weight
+            if is_completed:
+                priority_completed[prio] += 1
+                weight_completed += weight
+                if completed_dt and last_7_start <= completed_dt.date() <= today:
+                    weight_completed_last7 += weight
+                elif completed_dt and prev_7_start <= completed_dt.date() <= prev_7_end:
+                    weight_completed_prev7 += weight
+                if completed_day:
+                    completed_day_weights[completed_day] = completed_day_weights.get(completed_day, 0) + weight
+                if completed_dt and completed_has_time:
+                    completed_time_prios.append((completed_dt, prio))
 
         created_last7 = sum(1 for d in created_dates if last_7_start <= d <= today)
         created_prev7 = sum(1 for d in created_dates if prev_7_start <= d <= prev_7_end)
@@ -1084,60 +1413,6 @@ class DashboardPage(QWidget):
 
         self.consistency_labels_data = [day.strftime("%a") for day in last_7_days]
 
-        # Heatmap (last 3 days, 2-hour buckets across full day)
-        last_3_days = [today - timedelta(days=2 - i) for i in range(3)]
-        bucket_labels = _heatmap_time_labels_2h()
-        bucket_count = len(bucket_labels)
-        heat_counts = [[0 for _ in range(bucket_count)] for _ in range(3)]
-
-        def heat_bucket(hour):
-            return hour // 2
-
-        for dt in completed_times:
-            if dt.date() in last_3_days:
-                row_idx = last_3_days.index(dt.date())
-                bucket = heat_bucket(dt.hour)
-                heat_counts[row_idx][bucket] += 1
-
-        has_heat_time = any(sum(row) > 0 for row in heat_counts)
-        if not has_heat_time:
-            fallback_counts = [sum(1 for d in completed_dates if d == day) for day in last_3_days]
-            max_fallback = max(fallback_counts) if fallback_counts else 0
-            self.heatmap_values = []
-            for count in fallback_counts:
-                if max_fallback == 0 or count == 0:
-                    level = 0
-                else:
-                    ratio = count / max_fallback
-                    if ratio <= 0.33:
-                        level = 1
-                    elif ratio <= 0.66:
-                        level = 2
-                    else:
-                        level = 3
-                self.heatmap_values.append([level] * bucket_count)
-        else:
-            max_heat = max(max(row) for row in heat_counts) if heat_counts else 0
-            self.heatmap_values = []
-            for row in heat_counts:
-                levels = []
-                for count in row:
-                    if max_heat == 0 or count == 0:
-                        level = 0
-                    else:
-                        ratio = count / max_heat
-                        if ratio <= 0.33:
-                            level = 1
-                        elif ratio <= 0.66:
-                            level = 2
-                        else:
-                            level = 3
-                    levels.append(level)
-                self.heatmap_values.append(levels)
-
-        self.heatmap_day_labels_data = [day.strftime("%a") for day in last_3_days]
-        self.heatmap_time_labels_data = bucket_labels
-
         # Velocity (last 7 days completions)
         max_velocity = max(day_counts) if day_counts else 0
         if max_velocity == 0:
@@ -1179,6 +1454,224 @@ class DashboardPage(QWidget):
 
         self.completion_value = int(round(overall_rate * 100))
 
+        # --- Priority-weighted insights ---
+        quality_score = int(round((weight_completed / max(weight_total, 1)) * 100)) if weight_total else 0
+        high_total = priority_counts.get("high", 0)
+        high_completed = priority_completed.get("high", 0)
+        high_completion_pct = int(round((high_completed / high_total) * 100)) if high_total else 0
+
+        priority_minutes = {level: 0 for level in PRIORITY_LEVELS}
+        priority_sessions = {level: 0 for level in PRIORITY_LEVELS}
+        recent_sessions = []
+        last_3_days = [today - timedelta(days=2 - i) for i in range(3)]
+        bucket_labels = _heatmap_time_labels_2h()
+        bucket_count = len(bucket_labels)
+        heat_weights = [[0.0 for _ in range(bucket_count)] for _ in range(3)]
+        heat_has_data = False
+        priority_day_weights = {}
+        priority_day_minutes = {}
+        priority_bucket_weights = [0.0 for _ in range(bucket_count)]
+        conn = get_db_connection()
+        try:
+            info = conn.execute("PRAGMA table_info(pomodoro_sessions)").fetchall()
+            if info:
+                cols = {row[1] for row in info}
+                select_cols = ["task_id", "started_at", "duration_min", "status"]
+                if "task_priority" in cols:
+                    select_cols.insert(1, "task_priority")
+                rows = conn.execute(
+                    f"SELECT {', '.join(select_cols)} FROM pomodoro_sessions"
+                ).fetchall()
+                has_priority_col = "task_priority" in cols
+            else:
+                rows = []
+                has_priority_col = False
+        except Exception as exc:
+            print("DB Error (Priority Pomodoro):", exc)
+            rows = []
+        finally:
+            conn.close()
+
+        for row in rows:
+            if has_priority_col:
+                task_id, task_priority, started_at, duration_min, status = row
+            else:
+                task_id, started_at, duration_min, status = row
+            status_norm = str(status).strip().lower() if status is not None else ""
+            if status_norm and status_norm not in ("completed", "stopped"):
+                continue
+            prio = None
+            if has_priority_col:
+                prio = normalize_priority(task_priority)
+            if prio not in PRIORITY_LEVELS:
+                prio = tasks_by_id.get(task_id)
+            if prio not in PRIORITY_LEVELS:
+                continue
+            dt, _ = self._parse_date(started_at)
+            if dt:
+                recent_sessions.append((dt, prio))
+                if last_7_start <= dt.date() <= today:
+                    priority_minutes[prio] += int(duration_min or 0)
+                    priority_sessions[prio] += 1
+                    minutes = int(duration_min or 0)
+                    if minutes > 0:
+                        weighted = minutes * priority_weight(prio)
+                        priority_day_weights[dt.date()] = priority_day_weights.get(dt.date(), 0) + weighted
+                        priority_day_minutes[dt.date()] = priority_day_minutes.get(dt.date(), 0) + minutes
+                        priority_bucket_weights[dt.hour // 2] += weighted
+                if dt.date() in last_3_days:
+                    row_idx = last_3_days.index(dt.date())
+                    bucket = dt.hour // 2
+                    duration = int(duration_min or 0)
+                    if duration <= 0:
+                        duration = 1
+                    heat_weights[row_idx][bucket] += priority_weight(prio) * duration
+                    heat_has_data = True
+
+        if not heat_has_data and completed_time_prios:
+            heat_weights = [[0.0 for _ in range(bucket_count)] for _ in range(3)]
+            for dt, prio in completed_time_prios:
+                if dt.date() in last_3_days:
+                    row_idx = last_3_days.index(dt.date())
+                    bucket = dt.hour // 2
+                    heat_weights[row_idx][bucket] += priority_weight(prio)
+            heat_has_data = any(sum(row) > 0 for row in heat_weights)
+
+        def _heat_level(value, max_val):
+            if max_val <= 0 or value <= 0:
+                return 0
+            ratio = value / max_val
+            if ratio <= 0.33:
+                return 1
+            if ratio <= 0.66:
+                return 2
+            return 3
+
+        if heat_has_data:
+            max_heat = max(max(row) for row in heat_weights) if heat_weights else 0
+            self.heatmap_values = []
+            for row in heat_weights:
+                self.heatmap_values.append([_heat_level(value, max_heat) for value in row])
+        else:
+            fallback_weights = [completed_day_weights.get(day, 0) for day in last_3_days]
+            max_fallback = max(fallback_weights) if fallback_weights else 0
+            self.heatmap_values = []
+            for weight in fallback_weights:
+                level = _heat_level(weight, max_fallback)
+                self.heatmap_values.append([level] * bucket_count)
+
+        self.heatmap_day_labels_data = [day.strftime("%a") for day in last_3_days]
+        self.heatmap_time_labels_data = bucket_labels
+
+        total_priority_minutes = sum(priority_minutes.values())
+        low_minutes = priority_minutes.get("low", 0) + priority_minutes.get("too low", 0)
+        low_time_pct = int(round((low_minutes / total_priority_minutes) * 100)) if total_priority_minutes else 0
+        high_time_pct = (priority_minutes.get("high", 0) / total_priority_minutes) if total_priority_minutes else 0.0
+        high_medium_minutes = priority_minutes.get("high", 0) + priority_minutes.get("medium", 0)
+        high_medium_pct = int(round((high_medium_minutes / total_priority_minutes) * 100)) if total_priority_minutes else 0
+
+        peak_window_label = None
+        if any(priority_bucket_weights):
+            peak_idx = max(range(bucket_count), key=lambda i: (priority_bucket_weights[i], -i))
+            if 0 <= peak_idx < len(bucket_labels):
+                peak_window_label = bucket_labels[peak_idx]
+
+        best_day_label = None
+        best_day_minutes = 0
+        if priority_day_weights:
+            best_day = max(priority_day_weights.items(), key=lambda item: (item[1], item[0]))[0]
+            best_day_label = best_day.strftime("%a")
+            best_day_minutes = priority_day_minutes.get(best_day, 0)
+
+        self.priority_minutes_week = dict(priority_minutes)
+        self.priority_sessions_week = dict(priority_sessions)
+
+        recent_sessions.sort(key=lambda item: item[0], reverse=True)
+        recent_priorities = [p for _, p in recent_sessions[:3]]
+        high_streak = len(recent_priorities) >= 3 and all(p == "high" for p in recent_priorities)
+        high_load = max(high_total - high_completed, 0)
+        burnout = (high_time_pct >= 0.7 and high_load >= 3) or high_streak
+
+        def _join_sentences(*parts):
+            return " ".join(part.strip() for part in parts if part and str(part).strip())
+
+        peak_note = f"Peak priority window: {peak_window_label}." if peak_window_label else ""
+        best_day_note = (
+            f"Best priority day: {best_day_label} ({best_day_minutes} mins)."
+            if best_day_label
+            else ""
+        )
+
+        if weight_total == 0:
+            self.ai_primary_title_text = "Priority focus score"
+            self.ai_primary_desc_text = "Add priority tasks to unlock quality insights."
+        else:
+            self.ai_primary_title_text = f"Quality score: {quality_score}"
+            base_primary = (
+                f"High-priority completion: {high_completion_pct}%. "
+                f"Low/too low time: {low_time_pct}%."
+            )
+            self.ai_primary_desc_text = _join_sentences(base_primary, peak_note)
+
+        if burnout:
+            self.ai_secondary_title_text = "Burnout warning"
+            self.ai_secondary_desc_text = _join_sentences(
+                "High-priority load is intense. Add recovery time or delegate low-value work.",
+                best_day_note
+            )
+        elif total_priority_minutes == 0 and sum(priority_counts.values()) > 0:
+            self.ai_secondary_title_text = "Priority mix"
+            self.ai_secondary_desc_text = _join_sentences(
+                f"{high_total} high, {priority_counts.get('medium', 0)} medium, "
+                f"{priority_counts.get('low', 0)} low, {priority_counts.get('too low', 0)} too low.",
+                best_day_note
+            )
+        elif low_time_pct >= 50 and total_priority_minutes > 0:
+            self.ai_secondary_title_text = "Refocus"
+            self.ai_secondary_desc_text = _join_sentences(
+                f"You spent {low_time_pct}% on low-value work. Start with a high-priority Pomodoro.",
+                best_day_note
+            )
+        elif high_total > 0 and high_completion_pct < 40:
+            self.ai_secondary_title_text = "Critical gap"
+            self.ai_secondary_desc_text = _join_sentences(
+                "High-priority tasks are lagging. Plan a deep-focus block early.",
+                best_day_note
+            )
+        else:
+            self.ai_secondary_title_text = "Balance check"
+            self.ai_secondary_desc_text = _join_sentences(
+                f"Priority mix looks healthy. High/medium focus: {high_medium_pct}%.",
+                best_day_note
+            )
+
+        if burnout:
+            self.ai_badge_text = "Warning"
+            self.ai_action_text = "Plan Recovery"
+        elif low_time_pct >= 50 and total_priority_minutes > 0:
+            self.ai_badge_text = "Refocus"
+            self.ai_action_text = "Block High Priority"
+        elif high_total > 0 and high_completion_pct < 40:
+            self.ai_badge_text = "Focus"
+            self.ai_action_text = "Schedule Deep Work"
+        elif total_priority_minutes == 0:
+            self.ai_badge_text = "Needs Data"
+            self.ai_action_text = "Start a Pomodoro"
+        else:
+            self.ai_badge_text = "Recommended"
+            self.ai_action_text = "Schedule Deep Work"
+
+        if high_total > 0 and priority_minutes.get("high", 0) == 0 and total_priority_minutes > 0:
+            self.ai_recommendation_text = "Start the day with a high-priority session."
+        elif low_time_pct >= 50 and total_priority_minutes > 0:
+            self.ai_recommendation_text = "Protect your first Pomodoro for high-priority work."
+        elif priority_minutes.get("medium", 0) > 0 and high_time_pct >= 0.7:
+            self.ai_recommendation_text = "Schedule medium-priority tasks after peak focus hours."
+        elif high_total == 0 and priority_counts.get("medium", 0) > 0:
+            self.ai_recommendation_text = "Use your first Pomodoro to plan a medium-priority task."
+        else:
+            self.ai_recommendation_text = "Start the day with a high-priority session."
+
         now = datetime.now().strftime("%I:%M %p").lstrip("0")
         self._set_status(f"Updated {now}")
         self.header_chip.setProperty("state", "live")
@@ -1209,8 +1702,10 @@ class DashboardPage(QWidget):
             conn.close()
 
         day_map = {i: 0 for i in range(7)}
+        day_sessions = {i: 0 for i in range(7)}
         for started_at, duration_min, status in rows:
-            if status and str(status).lower() != "completed":
+            status_norm = str(status).strip().lower() if status is not None else ""
+            if status_norm and status_norm not in ("completed", "stopped"):
                 continue
             dur = int(duration_min or 0)
             self.pomo_minutes_total += dur
@@ -1222,8 +1717,10 @@ class DashboardPage(QWidget):
                 day_index = (dt.date() - last_7_start).days
                 if 0 <= day_index <= 6:
                     day_map[day_index] += dur
+                    day_sessions[day_index] += 1
 
         self.pomo_day_minutes = [day_map[i] for i in range(7)]
+        self.pomo_day_sessions = [day_sessions[i] for i in range(7)]
         self.pomo_day_labels = [(last_7_start + timedelta(days=i)).strftime("%a") for i in range(7)]
         if self.pomo_sessions_week > 0:
             self.pomo_avg_minutes = int(round(self.pomo_minutes_week / max(self.pomo_sessions_week, 1)))
@@ -1236,6 +1733,14 @@ class DashboardPage(QWidget):
                 best_idx = self.pomo_day_minutes.index(max_val)
                 self.pomo_best_day_minutes = max_val
                 self.pomo_best_day_label = self.pomo_day_labels[best_idx]
+
+        avg_sessions = sum(self.pomo_day_sessions) / 7 if self.pomo_day_sessions else 0
+        avg_sessions = round(avg_sessions, 1)
+        self.velocity_counts = list(self.pomo_day_sessions)
+        self.velocity_capacity = [avg_sessions for _ in range(7)]
+        self.velocity_point_value = avg_sessions
+        self.velocity_point_index = 6
+        self.velocity_day_labels_data = [label[:1] for label in self.pomo_day_labels]
 
     def _apply_dynamic_styles(self):
         if not self._colors:
@@ -1270,62 +1775,19 @@ class DashboardPage(QWidget):
 
     def update_theme(self, theme):
         self.current_theme = theme
-        if theme == "Dark":
-            colors = {
-                "bg": "#0B0F1A",
-                "card": "#121828",
-                "border": "#22304A",
-                "text": "#F8FAFC",
-                "sub": "#94A3B8",
-                "accent": "#38BDF8",
-                "accent2": "#22D3EE",
-                "accent_soft": "#0B3A5A",
-                "chip": "#0B3A5A",
-                "chip_text": "#7DD3FC",
-                "primary": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0B3A5A, stop:1 #0F172A)",
-                "secondary": "#111827",
-                "shadow": "#0B1220",
-                "heat0": "#1F2937",
-                "heat1": "#0B4A6E",
-                "heat2": "#0284C7",
-                "heat3": "#38BDF8",
-                "velocity": "#38BDF8",
-                "capacity": "#A855F7",
-                "chart_grid": "#1F2937",
-                "good": "#22C55E",
-                "bad": "#F87171",
-            }
-        else:
-            colors = {
-                "bg": "#F4F7FF",
-                "card": "#FFFFFF",
-                "border": "#D6E4FF",
-                "text": "#0B132B",
-                "sub": "#5B6B8A",
-                "accent": "#2563EB",
-                "accent2": "#06B6D4",
-                "accent_soft": "#DBEAFE",
-                "chip": "#E0F2FF",
-                "chip_text": "#2563EB",
-                "primary": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #E0F2FF, stop:1 #DBEAFE)",
-                "secondary": "#F8FAFF",
-                "shadow": "#DCE7FF",
-                "heat0": "#E2E8F0",
-                "heat1": "#93C5FD",
-                "heat2": "#60A5FA",
-                "heat3": "#2563EB",
-                "velocity": "#2563EB",
-                "capacity": "#7C3AED",
-                "chart_grid": "#E2E8F0",
-                "good": "#22C55E",
-                "bad": "#EF4444",
-            }
+        colors = get_theme(theme)
 
         self._colors = colors
 
         self.setStyleSheet(
-            "QWidget#DashboardPage { background: %s; }" % colors["bg"]
+            "QWidget#DashboardPage { background: %s; font-family: '%s', 'Segoe UI'; }" %
+            (colors["bg"], FONT_FAMILY)
         )
+
+        if hasattr(self, "container") and self.container:
+            self.container.setStyleSheet(
+                "QWidget#DashContainer { background: %s; }" % colors["bg"]
+            )
 
         self.kicker.setStyleSheet(
             "color: %s; font-size: 11px; font-weight: 800;" % colors["accent"]
@@ -1337,8 +1799,9 @@ class DashboardPage(QWidget):
             "color: %s; font-size: 13px; font-weight: 600;" % colors["sub"]
         )
         if self.header_status:
+            status_color = colors["sub"] if theme == "Dark" else colors["text"]
             self.header_status.setStyleSheet(
-                "color: %s; font-size: 11px; font-weight: 600;" % colors["sub"]
+                "color: %s; font-size: 11px; font-weight: 600;" % status_color
             )
 
         for title in self.section_titles:
@@ -1388,7 +1851,7 @@ class DashboardPage(QWidget):
         if header:
             header.setStyleSheet(
                 "QFrame#DashHeader { background: %s; border: 1px solid %s; border-radius: 20px; }" %
-                (colors["primary"], colors["border"])
+                (colors["primary_gradient"], colors["border"])
             )
 
         for badge in self.badges:
@@ -1409,7 +1872,7 @@ class DashboardPage(QWidget):
         if primary:
             primary.setStyleSheet(
                 "QFrame#DashPrimary { background: %s; border: 1px solid %s; border-radius: 22px; }" %
-                (colors["primary"], colors["border"])
+                (colors["primary_gradient"], colors["border"])
             )
 
         secondary = self.findChild(QFrame, "DashSecondary")
@@ -1437,7 +1900,7 @@ class DashboardPage(QWidget):
 
         for link in self.findChildren(QPushButton, "DashLink"):
             link.setStyleSheet(
-                "QPushButton { background: transparent; color: %s; border: none; font-weight: bold; }"
+                "QPushButton { background-color: transparent; color: %s; border: none; font-weight: bold; }"
                 "QPushButton:hover { color: %s; }" % (colors["accent"], colors["accent2"])
             )
 
@@ -1454,5 +1917,7 @@ class DashboardPage(QWidget):
             self.velocity_chart.set_theme(colors, theme)
         if hasattr(self, "pomo_chart") and self.pomo_chart:
             self.pomo_chart.set_theme(colors, theme)
+        if hasattr(self, "priority_chart") and self.priority_chart:
+            self.priority_chart.set_theme(colors, theme)
 
         self._apply_dynamic_styles()

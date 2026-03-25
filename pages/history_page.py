@@ -11,13 +11,37 @@ from PyQt6.QtWidgets import (
     QDialog,
     QGridLayout,
     QDateEdit,
-    QComboBox
+    QComboBox,
+    QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF, QTimer, QPoint, QDate, QLocale
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from database.db_manager import get_db_connection
+from resources.priority import normalize_priority, priority_weight, PRIORITY_LEVELS
+from resources.theme import get_theme
 from datetime import datetime, timedelta
 import calendar
+
+
+class NoWheelComboBox(QComboBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ensure_font_size()
+
+    def _ensure_font_size(self):
+        font = self.font()
+        if font.pointSize() <= 0:
+            font.setPointSize(10)
+            self.setFont(font)
+        view = self.view()
+        if view:
+            view_font = view.font()
+            if view_font.pointSize() <= 0:
+                view_font.setPointSize(10)
+                view.setFont(view_font)
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class FocusBarChart(QFrame):
@@ -49,58 +73,60 @@ class FocusBarChart(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 6
+            right_pad = 6
+            top_pad = 6
+            bottom_pad = 22
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        rect = QRectF(self.rect())
-        left_pad = 6
-        right_pad = 6
-        top_pad = 6
-        bottom_pad = 22
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            values = list(self.values)
+            max_val = max(values) if values else 1
+            if max_val <= 0:
+                max_val = 1
 
-        values = list(self.values)
-        max_val = max(values) if values else 1
-        if max_val <= 0:
-            max_val = 1
+            count = len(values)
+            if count == 0:
+                return
 
-        count = len(values)
-        if count == 0:
-            return
+            gap = 6
+            bar_w = (chart_rect.width() - gap * (count - 1)) / max(count, 1)
 
-        gap = 6
-        bar_w = (chart_rect.width() - gap * (count - 1)) / max(count, 1)
+            primary = QColor(self.colors.get("primary", "#11a4d4"))
+            soft = QColor(primary)
+            soft.setAlpha(45)
 
-        primary = QColor(self.colors.get("primary", "#11a4d4"))
-        soft = QColor(primary)
-        soft.setAlpha(45)
+            for idx, val in enumerate(values):
+                height = (val / max_val) * chart_rect.height()
+                x = chart_rect.left() + idx * (bar_w + gap)
+                y = chart_rect.bottom() - height
+                bar_rect = QRectF(x, y, bar_w, height)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(primary if idx == self.highlight_index else soft)
+                painter.drawRoundedRect(bar_rect, 4, 4)
 
-        for idx, val in enumerate(values):
-            height = (val / max_val) * chart_rect.height()
-            x = chart_rect.left() + idx * (bar_w + gap)
-            y = chart_rect.bottom() - height
-            bar_rect = QRectF(x, y, bar_w, height)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(primary if idx == self.highlight_index else soft)
-            painter.drawRoundedRect(bar_rect, 4, 4)
+            label_color = QColor(self.colors.get("sub", "#64748b"))
+            painter.setPen(label_color)
+            font = painter.font()
+            font.setPointSize(8)
+            font.setBold(True)
+            painter.setFont(font)
 
-        label_color = QColor(self.colors.get("sub", "#64748b"))
-        painter.setPen(label_color)
-        font = painter.font()
-        font.setPointSize(8)
-        font.setBold(True)
-        painter.setFont(font)
-
-        for idx, label in enumerate(self.labels):
-            if not label:
-                continue
-            text_width = painter.fontMetrics().horizontalAdvance(label)
-            x = chart_rect.left() + idx * (bar_w + gap) + (bar_w - text_width) / 2
-            y = rect.bottom() - 4
-            painter.drawText(QPointF(x, y), label)
+            for idx, label in enumerate(self.labels):
+                if not label:
+                    continue
+                text_width = painter.fontMetrics().horizontalAdvance(label)
+                x = chart_rect.left() + idx * (bar_w + gap) + (bar_w - text_width) / 2
+                y = rect.bottom() - 4
+                painter.drawText(QPointF(x, y), label)
+        finally:
+            painter.end()
 
 
 class EnergyTrendWidget(QFrame):
@@ -124,51 +150,53 @@ class EnergyTrendWidget(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            left_pad = 6
+            right_pad = 6
+            top_pad = 6
+            bottom_pad = 10
+            chart_rect = QRectF(
+                rect.left() + left_pad,
+                rect.top() + top_pad,
+                rect.width() - left_pad - right_pad,
+                rect.height() - top_pad - bottom_pad
+            )
 
-        rect = QRectF(self.rect())
-        left_pad = 6
-        right_pad = 6
-        top_pad = 6
-        bottom_pad = 10
-        chart_rect = QRectF(
-            rect.left() + left_pad,
-            rect.top() + top_pad,
-            rect.width() - left_pad - right_pad,
-            rect.height() - top_pad - bottom_pad
-        )
+            values = self.values or []
+            if not values:
+                return
 
-        values = self.values or []
-        if not values:
-            return
+            count = len(values)
+            step = chart_rect.width() / max(count - 1, 1)
+            points = []
+            for idx, value in enumerate(values):
+                x = chart_rect.left() + idx * step
+                y = chart_rect.bottom() - (max(0.0, min(value, 1.0)) * chart_rect.height())
+                points.append(QPointF(x, y))
 
-        count = len(values)
-        step = chart_rect.width() / max(count - 1, 1)
-        points = []
-        for idx, value in enumerate(values):
-            x = chart_rect.left() + idx * step
-            y = chart_rect.bottom() - (max(0.0, min(value, 1.0)) * chart_rect.height())
-            points.append(QPointF(x, y))
+            path = QPainterPath()
+            path.moveTo(points[0])
+            for pt in points[1:]:
+                path.lineTo(pt)
 
-        path = QPainterPath()
-        path.moveTo(points[0])
-        for pt in points[1:]:
-            path.lineTo(pt)
+            fill_path = QPainterPath(path)
+            fill_path.lineTo(chart_rect.right(), chart_rect.bottom())
+            fill_path.lineTo(chart_rect.left(), chart_rect.bottom())
+            fill_path.closeSubpath()
 
-        fill_path = QPainterPath(path)
-        fill_path.lineTo(chart_rect.right(), chart_rect.bottom())
-        fill_path.lineTo(chart_rect.left(), chart_rect.bottom())
-        fill_path.closeSubpath()
+            primary = QColor(self.colors.get("primary", "#11a4d4"))
+            fill = QColor(primary)
+            fill.setAlpha(60)
+            painter.fillPath(fill_path, fill)
 
-        primary = QColor(self.colors.get("primary", "#11a4d4"))
-        fill = QColor(primary)
-        fill.setAlpha(60)
-        painter.fillPath(fill_path, fill)
-
-        pen = QPen(primary, 2.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawPath(path)
+            pen = QPen(primary, 2.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(path)
+        finally:
+            painter.end()
 
 
 class QuickStatsDialog(QDialog):
@@ -326,7 +354,7 @@ class QuickStatsDialog(QDialog):
         self.colors = colors or {}
         c = self.colors
         self.overlay.setStyleSheet(
-            f"QFrame#QuickStatsOverlay {{ background: rgba(16, 29, 34, 0.78); }}"
+            f"QFrame#QuickStatsOverlay {{ background: rgba(16, 29, 34, 199); }}"
         )
         self.sheet.setStyleSheet(
             f"QFrame#QuickStatsSheet {{ background: {c['bg']}; border-top: 1px solid {c['primary_soft_border']}; border-radius: 16px; }}"
@@ -335,10 +363,10 @@ class QuickStatsDialog(QDialog):
             f"QFrame#QuickStatsHandle {{ background: {c['primary_soft_border']}; border-radius: 3px; }}"
         )
         self.header_kicker.setStyleSheet(
-            f"color: {c['primary']}; font-size: 11px; font-weight: 900; text-transform: uppercase;"
+            f"color: {c['primary']}; font-size: 11px; font-weight: 900;"
         )
         self.close_btn.setStyleSheet(
-            f"QPushButton {{ color: {c['sub']}; background: transparent; border: none; font-size: 12px; font-weight: 900; }}"
+            f"QPushButton {{ color: {c['sub']}; background-color: transparent; border: none; font-size: 12px; font-weight: bold; }}"
         )
         self.title_label.setStyleSheet(
             f"color: {c['text']}; font-size: 16px; font-weight: 900;"
@@ -351,7 +379,7 @@ class QuickStatsDialog(QDialog):
                 f"QFrame#QuickStatsCard {{ background: {c['primary_soft']}; border: 1px solid {c['primary_soft_border']}; border-radius: 12px; }}"
             )
             item["title"].setStyleSheet(
-                f"color: {c['sub']}; font-size: 9px; font-weight: 700; text-transform: uppercase;"
+                f"color: {c['sub']}; font-size: 9px; font-weight: 700;"
             )
             item["value"].setStyleSheet(
                 f"color: {c['text']}; font-size: 18px; font-weight: 900;"
@@ -367,7 +395,7 @@ class QuickStatsDialog(QDialog):
         )
         for lbl in (self.trend_start, self.trend_mid1, self.trend_mid2, self.trend_end):
             lbl.setStyleSheet(
-                f"color: {c['sub']}; font-size: 8px; font-weight: 800; text-transform: uppercase;"
+                f"color: {c['sub']}; font-size: 8px; font-weight: 800;"
             )
         for idx in range(self.details_container.layout().count()):
             row = self.details_container.layout().itemAt(idx).widget()
@@ -383,7 +411,7 @@ class QuickStatsDialog(QDialog):
                 f"color: {c['text']}; font-size: 10px; font-weight: 700;"
             )
         self.done_btn.setStyleSheet(
-            f"QPushButton#QuickStatsDone {{ background: {c['primary']}; color: white; border: none; border-radius: 12px; padding: 10px; font-size: 12px; font-weight: 900; }}"
+            f"QPushButton#QuickStatsDone {{ background-color: {c['primary']}; color: white; border: none; border-radius: 12px; padding: 10px; font-size: 12px; font-weight: bold; }}"
         )
         self.energy_chart.set_theme(c)
 
@@ -498,16 +526,16 @@ class HistoryPage(QWidget):
         locale = QLocale.system()
         self.month_names = [locale.monthName(i, QLocale.FormatType.LongFormat) for i in range(1, 13)]
 
-        self.day_combo = QComboBox()
+        self.day_combo = NoWheelComboBox()
         self.day_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.day_combo.currentIndexChanged.connect(self._on_day_picker_changed)
 
-        self.day_month_combo = QComboBox()
+        self.day_month_combo = NoWheelComboBox()
         self.day_month_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.day_month_combo.addItems(self.month_names)
         self.day_month_combo.currentIndexChanged.connect(self._on_day_picker_changed)
 
-        self.day_year_combo = QComboBox()
+        self.day_year_combo = NoWheelComboBox()
         self.day_year_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.day_year_combo.addItems([str(y) for y in range(2000, 2101)])
         self.day_year_combo.currentIndexChanged.connect(self._on_day_picker_changed)
@@ -522,16 +550,16 @@ class HistoryPage(QWidget):
         week_layout.setContentsMargins(0, 0, 0, 0)
         week_layout.setSpacing(6)
 
-        self.week_combo = QComboBox()
+        self.week_combo = NoWheelComboBox()
         self.week_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.week_combo.currentIndexChanged.connect(self._on_week_changed)
 
-        self.week_month_combo = QComboBox()
+        self.week_month_combo = NoWheelComboBox()
         self.week_month_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.week_month_combo.addItems(self.month_names)
         self.week_month_combo.currentIndexChanged.connect(self._on_week_changed)
 
-        self.week_year_combo = QComboBox()
+        self.week_year_combo = NoWheelComboBox()
         self.week_year_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.week_year_combo.addItems([str(y) for y in range(2000, 2101)])
         self.week_year_combo.setCurrentText(str(self.selected_date.year))
@@ -547,12 +575,12 @@ class HistoryPage(QWidget):
         month_layout.setContentsMargins(0, 0, 0, 0)
         month_layout.setSpacing(6)
 
-        self.month_combo = QComboBox()
+        self.month_combo = NoWheelComboBox()
         self.month_combo.addItems(self.month_names)
         self.month_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.month_combo.currentIndexChanged.connect(self._on_month_changed)
 
-        self.year_combo = QComboBox()
+        self.year_combo = NoWheelComboBox()
         self.year_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.year_combo.addItems([str(y) for y in range(2000, 2101)])
         self.year_combo.setCurrentText(str(self.selected_date.year))
@@ -715,9 +743,9 @@ class HistoryPage(QWidget):
 
         self.period_frame.setStyleSheet(
             f"QFrame#HistoryPeriod {{ background: {colors['card_alt']}; border: 1px solid {colors['border']}; border-radius: 10px; }}"
-            "QPushButton { border: none; padding: 6px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; }"
-            f"QPushButton:checked {{ background: {colors['card']}; color: {colors['primary']}; }}"
-            f"QPushButton:!checked {{ color: {colors['sub']}; }}"
+            "QPushButton { border: none; padding: 6px 10px; border-radius: 8px; font-size: 11px; font-weight: bold; }"
+            f"QPushButton:checked {{ background-color: {colors['card']}; color: {colors['primary']}; }}"
+            f"QPushButton:unchecked {{ color: {colors['sub']}; }}"
         )
         self.date_frame.setStyleSheet(
             f"QFrame#HistoryDatePicker {{ background: {colors['card_alt']}; border: 1px solid {colors['border']}; border-radius: 10px; }}"
@@ -731,13 +759,13 @@ class HistoryPage(QWidget):
         )
         self.month_combo.setStyleSheet(
             f"QComboBox {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; "
-            f"border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 700; }}"
+            f"border-radius: 8px; padding: 4px 8px; font-size: 7.5pt; font-weight: 700; }}"
             f"QComboBox QAbstractItemView {{ background: {colors['card']}; color: {colors['text']}; "
             f"selection-background-color: {colors['primary_soft']}; selection-color: {colors['text']}; border: 1px solid {colors['border']}; }}"
         )
         combo_style = (
             f"QComboBox {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; "
-            f"border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 700; }}"
+            f"border-radius: 8px; padding: 4px 8px; font-size: 7.5pt; font-weight: 700; }}"
             f"QComboBox QAbstractItemView {{ background: {colors['card']}; color: {colors['text']}; "
             f"selection-background-color: {colors['primary_soft']}; selection-color: {colors['text']}; border: 1px solid {colors['border']}; }}"
         )
@@ -749,10 +777,24 @@ class HistoryPage(QWidget):
         self.week_year_combo.setStyleSheet(combo_style)
         self.year_combo.setStyleSheet(
             f"QComboBox {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; "
-            f"border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 700; }}"
+            f"border-radius: 8px; padding: 4px 8px; font-size: 7.5pt; font-weight: 700; }}"
             f"QComboBox QAbstractItemView {{ background: {colors['card']}; color: {colors['text']}; "
             f"selection-background-color: {colors['primary_soft']}; selection-color: {colors['text']}; border: 1px solid {colors['border']}; }}"
         )
+        for combo in (
+            self.month_combo,
+            self.day_combo,
+            self.day_month_combo,
+            self.day_year_combo,
+            self.week_combo,
+            self.week_month_combo,
+            self.week_year_combo,
+            self.year_combo,
+        ):
+            try:
+                combo._ensure_font_size()
+            except Exception:
+                pass
 
         self.focus_label.setStyleSheet(
             f"color: {colors['sub']}; font-size: 11px; font-weight: 700;"
@@ -768,7 +810,7 @@ class HistoryPage(QWidget):
                 f"QFrame#HistoryStatCard {{ background: {colors['primary_soft']}; border: 1px solid {colors['primary_soft_border']}; border-radius: 14px; }}"
             )
             item["title"].setStyleSheet(
-                f"color: {colors['sub']}; font-size: 9px; font-weight: 800; text-transform: uppercase;"
+                f"color: {colors['sub']}; font-size: 9px; font-weight: 800;"
             )
             item["value"].setStyleSheet(
                 f"color: {colors['primary']}; font-size: 20px; font-weight: 900;"
@@ -780,7 +822,7 @@ class HistoryPage(QWidget):
             f" border: 1px solid {colors['primary_soft_border']}; border-radius: 14px; }}"
         )
         self.latest_label.setStyleSheet(
-            f"color: {colors['primary']}; font-size: 10px; font-weight: 800; text-transform: uppercase;"
+            f"color: {colors['primary']}; font-size: 10px; font-weight: 800;"
         )
         self.latest_subtitle.setStyleSheet(
             f"color: {colors['text']}; font-size: 12px; font-weight: 700;"
@@ -791,10 +833,10 @@ class HistoryPage(QWidget):
         )
 
         self.activity_button.setStyleSheet(
-            f"QPushButton#HistoryLinkButton {{ color: {colors['primary']}; background: transparent; border: none; font-size: 10px; font-weight: 800; }}"
+            f"QPushButton#HistoryLinkButton {{ color: {colors['primary']}; background-color: transparent; border: none; font-size: 10px; font-weight: bold; }}"
         )
         self.latest_action.setStyleSheet(
-            f"QPushButton#HistoryLinkButton {{ color: {colors['primary']}; background: transparent; border: none; font-size: 10px; font-weight: 800; }}"
+            f"QPushButton#HistoryLinkButton {{ color: {colors['primary']}; background-color: transparent; border: none; font-size: 10px; font-weight: bold; }}"
         )
 
         self.insight_frame.setStyleSheet(
@@ -803,49 +845,18 @@ class HistoryPage(QWidget):
             f" border: 1px solid {colors['primary_soft_border']}; border-radius: 18px; }}"
         )
         self.insight_kicker.setStyleSheet(
-            f"color: {colors['primary']}; font-size: 10px; font-weight: 800; text-transform: uppercase;"
+            f"color: {colors['primary']}; font-size: 10px; font-weight: 800;"
         )
         self.insight_text.setStyleSheet(
             f"color: {colors['text']}; font-size: 12px; font-weight: 600;"
         )
         self.insight_action.setStyleSheet(
-            f"QPushButton#HistoryPrimaryButton {{ background: {colors['primary_soft']}; color: {colors['primary']}; border: none; border-radius: 10px; padding: 8px 10px; font-size: 10px; font-weight: 900; text-transform: uppercase; }}"
+            f"QPushButton#HistoryPrimaryButton {{ background-color: {colors['primary_soft']}; color: {colors['primary']}; border: none; border-radius: 10px; padding: 8px 10px; font-size: 10px; font-weight: bold; }}"
         )
 
     def update_theme(self, theme):
         self.current_theme = theme
-        if theme == "Dark":
-            self.colors = {
-                "bg": "#101d22",
-                "card": "#0f1b20",
-                "card_alt": "#0c1519",
-                "border": "#1f2a2f",
-                "text": "#f1f5f9",
-                "sub": "#94a3b8",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.18)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.35)",
-                "card_selected": "#0f2530",
-                "card_selected_border": "#1b6b84",
-                "good": "#34d399",
-                "bad": "#f87171",
-            }
-        else:
-            self.colors = {
-                "bg": "#f6f8f8",
-                "card": "#ffffff",
-                "card_alt": "#f1f5f9",
-                "border": "#e2e8f0",
-                "text": "#0f172a",
-                "sub": "#64748b",
-                "primary": "#11a4d4",
-                "primary_soft": "rgba(17, 164, 212, 0.12)",
-                "primary_soft_border": "rgba(17, 164, 212, 0.25)",
-                "card_selected": "#e6f6fb",
-                "card_selected_border": "#68c3e6",
-                "good": "#10b981",
-                "bad": "#ef4444",
-            }
+        self.colors = get_theme(theme)
 
         self.apply_styles()
         self.refresh_history()
@@ -885,16 +896,32 @@ class HistoryPage(QWidget):
         base = datetime(2000, 1, 1, hour % 24, 0)
         return base.strftime("%I:%M %p").lstrip("0")
 
-    def _compute_period_insight(self, session_rows, start_date, end_date):
+    def _compute_period_insight(self, session_rows, start_date, end_date, tasks_by_id):
         sessions = []
-        for _, _, _, started_at, duration_min, status in session_rows:
+        for row in session_rows:
+            if len(row) >= 7:
+                _, task_id, _, task_priority, started_at, duration_min, status = row[:7]
+            else:
+                _, task_id, _, started_at, duration_min, status = row[:6]
+                task_priority = None
+
+            status_norm = str(status).strip().lower() if status is not None else ""
+            if status_norm and status_norm not in ("completed", "stopped"):
+                continue
+
             dt = self._parse_dt(started_at)
             if not dt or not (start_date <= dt.date() <= end_date):
                 continue
             minutes = int(duration_min or 0)
             if minutes <= 0:
                 continue
-            sessions.append((dt, minutes))
+
+            prio = normalize_priority(task_priority) if task_priority else None
+            if prio not in PRIORITY_LEVELS:
+                prio = tasks_by_id.get(task_id)
+            if prio not in PRIORITY_LEVELS:
+                prio = "too low"
+            sessions.append((dt, minutes, prio))
 
         if not sessions:
             if self.current_period == "Day":
@@ -903,51 +930,71 @@ class HistoryPage(QWidget):
                 return "No focus sessions yet this month. Start a session to unlock insights."
             return "No focus sessions yet this week. Start a session to unlock insights."
 
-        total_minutes = sum(minutes for _, minutes in sessions)
+        total_minutes = sum(minutes for _, minutes, _ in sessions)
         total_sessions = len(sessions)
         avg_minutes = int(round(total_minutes / max(total_sessions, 1)))
-        active_days = len({dt.date() for dt, _ in sessions})
+        active_days = len({dt.date() for dt, _, _ in sessions})
 
-        buckets = [0] * 12
-        for dt, minutes in sessions:
-            buckets[dt.hour // 2] += minutes
-        peak_idx = max(range(len(buckets)), key=lambda i: (buckets[i], -i))
+        priority_minutes = {level: 0 for level in PRIORITY_LEVELS}
+        minutes_by_day = {}
+        weighted_by_day = {}
+        raw_buckets = [0] * 12
+        weighted_buckets = [0.0] * 12
+        for dt, minutes, prio in sessions:
+            priority_minutes[prio] += minutes
+            minutes_by_day[dt.date()] = minutes_by_day.get(dt.date(), 0) + minutes
+            weight = priority_weight(prio)
+            weighted = minutes * weight
+            weighted_by_day[dt.date()] = weighted_by_day.get(dt.date(), 0) + weighted
+            bucket = dt.hour // 2
+            raw_buckets[bucket] += minutes
+            weighted_buckets[bucket] += weighted
+
+        high_minutes = priority_minutes.get("high", 0)
+        medium_minutes = priority_minutes.get("medium", 0)
+        high_medium = high_minutes + medium_minutes
+        high_medium_pct = int(round((high_medium / total_minutes) * 100)) if total_minutes else 0
+
+        bucket_source = weighted_buckets if max(weighted_buckets) > 0 else raw_buckets
+        peak_idx = max(range(len(bucket_source)), key=lambda i: (bucket_source[i], -i))
         start_hour = peak_idx * 2
         end_hour = (start_hour + 2) % 24
         window_text = f"{self._format_hour_label(start_hour)} and {self._format_hour_label(end_hour)}"
 
         if self.current_period == "Day":
-            longest = max(minutes for _, minutes in sessions)
+            longest = max(minutes for _, minutes, _ in sessions)
             return (
                 f"Today you logged {total_minutes} mins across {total_sessions} sessions. "
-                f"Peak focus window was {window_text}, and your longest session was {longest} mins."
+                f"High/medium priority time: {high_medium_pct}%. "
+                f"Peak priority window was {window_text}, and your longest session was {longest} mins."
             )
 
         if self.current_period == "Month":
             span_days = (end_date - start_date).days + 1
             week_bins = max(1, (span_days + 6) // 7)
-            week_minutes = [0] * week_bins
-            for dt, minutes in sessions:
+            week_weighted = [0.0] * week_bins
+            for dt, minutes, prio in sessions:
                 idx = (dt.date() - start_date).days // 7
                 idx = min(max(idx, 0), week_bins - 1)
-                week_minutes[idx] += minutes
-            best_week_idx = max(range(week_bins), key=lambda i: week_minutes[i])
+                week_weighted[idx] += minutes * priority_weight(prio)
+            best_week_idx = max(range(week_bins), key=lambda i: (week_weighted[i], -i))
             best_start = start_date + timedelta(days=best_week_idx * 7)
             best_end = min(best_start + timedelta(days=6), end_date)
             best_range = f"{best_start.strftime('%b %d')} - {best_end.strftime('%b %d')}"
             return (
                 f"This month you focused {total_minutes} mins across {total_sessions} sessions on {active_days} days. "
-                f"Your strongest stretch was {best_range}, and your peak window was {window_text}."
+                f"High/medium priority time: {high_medium_pct}%. "
+                f"Your strongest priority stretch was {best_range}, with a peak window at {window_text}."
             )
 
-        minutes_by_day = {}
-        for dt, minutes in sessions:
-            minutes_by_day[dt.date()] = minutes_by_day.get(dt.date(), 0) + minutes
-        best_day = max(minutes_by_day.items(), key=lambda item: (item[1], item[0]))
+        best_by_source = weighted_by_day if max(weighted_by_day.values(), default=0) > 0 else minutes_by_day
+        best_day = max(best_by_source.items(), key=lambda item: (item[1], item[0]))
         best_day_label = best_day[0].strftime("%a")
         return (
             f"This week you focused {total_minutes} mins across {total_sessions} sessions on {active_days} days. "
-            f"Your best day was {best_day_label} ({best_day[1]} mins), with a peak window at {window_text}."
+            f"High/medium priority time: {high_medium_pct}%. "
+            f"Your best priority day was {best_day_label} ({minutes_by_day.get(best_day[0], 0)} mins), "
+            f"with a peak window at {window_text}."
         )
 
     def _on_period_changed(self, button):
@@ -1043,13 +1090,18 @@ class HistoryPage(QWidget):
         except Exception:
             pass
 
+    def _weeks_in_month(self, year, month):
+        days_in_month = calendar.monthrange(year, month)[1]
+        return 5 if days_in_month > 28 else 4
+
     def _update_week_combo(self, year, month, selected_week=None):
         if selected_week is None:
             selected_week = 1
-        selected_week = max(1, min(selected_week, 4))
+        weeks_count = self._weeks_in_month(year, month)
+        selected_week = max(1, min(selected_week, weeks_count))
         self.week_combo.blockSignals(True)
         self.week_combo.clear()
-        for w in range(1, 5):
+        for w in range(1, weeks_count + 1):
             self.week_combo.addItem(f"Week {w}")
         self.week_combo.setCurrentIndex(selected_week - 1)
         self.week_combo.blockSignals(False)
@@ -1068,14 +1120,34 @@ class HistoryPage(QWidget):
     def _month_week_index(self, date_value):
         first_of_month = date_value.replace(day=1)
         day_offset = (date_value - first_of_month).days
-        return min(4, (day_offset // 7) + 1)
+        weeks_count = self._weeks_in_month(date_value.year, date_value.month)
+        return min(weeks_count, (day_offset // 7) + 1)
 
     def _month_week_start(self, year, month, week):
-        week = max(1, min(int(week), 4))
+        weeks_count = self._weeks_in_month(year, month)
+        week = max(1, min(int(week), weeks_count))
         start_day = 1 + (week - 1) * 7
         days_in_month = calendar.monthrange(year, month)[1]
         start_day = min(start_day, days_in_month)
         return datetime(year, month, start_day).date()
+
+    def _week_month_bounds(self):
+        try:
+            year = int(self.week_year_combo.currentText())
+            month = self.week_month_combo.currentIndex() + 1
+            week = self.week_combo.currentIndex() + 1
+        except Exception:
+            base = self.selected_date or datetime.now().date()
+            year = base.year
+            month = base.month
+            week = self._month_week_index(base)
+        start = self._month_week_start(year, month, week)
+        days_in_month = calendar.monthrange(year, month)[1]
+        end_of_month = datetime(year, month, days_in_month).date()
+        end = min(start + timedelta(days=6), end_of_month)
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=6)
+        return start, end, prev_start, prev_end
 
     def _on_month_changed(self, _=None):
         try:
@@ -1103,10 +1175,7 @@ class HistoryPage(QWidget):
             prev_end = start - timedelta(days=1)
             prev_start = prev_end.replace(day=1)
         else:
-            start = base_date - timedelta(days=base_date.weekday())
-            end = start + timedelta(days=6)
-            prev_start = start - timedelta(days=7)
-            prev_end = start - timedelta(days=1)
+            start, end, prev_start, prev_end = self._week_month_bounds()
         return start, end, prev_start, prev_end
 
     def _build_focus_buckets(self, sessions, start, end):
@@ -1163,8 +1232,26 @@ class HistoryPage(QWidget):
             task_rows = []
 
         try:
+            task_priority_rows = conn.execute(
+                "SELECT id, priority FROM tasks"
+            ).fetchall()
+        except Exception:
+            task_priority_rows = []
+
+        tasks_by_id = {}
+        for task_id, prio in task_priority_rows:
+            norm = normalize_priority(prio)
+            if norm in PRIORITY_LEVELS:
+                tasks_by_id[task_id] = norm
+
+        try:
+            info = conn.execute("PRAGMA table_info(pomodoro_sessions)").fetchall()
+            cols = {row[1] for row in info} if info else set()
+            select_cols = ["id", "task_id", "task_title", "started_at", "duration_min", "status"]
+            if "task_priority" in cols:
+                select_cols.insert(3, "task_priority")
             session_rows = conn.execute(
-                "SELECT id, task_id, task_title, started_at, duration_min, status FROM pomodoro_sessions"
+                f"SELECT {', '.join(select_cols)} FROM pomodoro_sessions"
             ).fetchall()
         except Exception:
             session_rows = []
@@ -1193,7 +1280,13 @@ class HistoryPage(QWidget):
         sessions_count_prev = 0
         minutes_by_task_period = {}
 
-        for session_id, task_id, task_title, started_at, duration_min, status in session_rows:
+        for row in session_rows:
+            if len(row) >= 7:
+                session_id, task_id, task_title, task_priority, started_at, duration_min, status = row[:7]
+            else:
+                session_id, task_id, task_title, started_at, duration_min, status = row[:6]
+                task_priority = None
+
             dt = self._parse_dt(started_at)
             if not dt:
                 continue
@@ -1257,9 +1350,9 @@ class HistoryPage(QWidget):
             latest_dt = self._parse_dt(latest_task[3])
             latest_title = latest_task[1]
 
-        if latest_dt and latest_title:
-            date_label = latest_dt.strftime("%b %d")
-            latest_label = f"{date_label} - {latest_title}"
+        if latest_dt:
+            date_label = latest_dt.strftime("%A %d %B %Y")
+            latest_label = date_label
         self.latest_subtitle.setText(latest_label)
 
         activities = []
@@ -1304,7 +1397,7 @@ class HistoryPage(QWidget):
                 self.insight_kicker.setText("Monthly AI Insight")
             else:
                 self.insight_kicker.setText("Weekly AI Insight")
-            self.insight_text.setText(self._compute_period_insight(session_rows, start, end))
+            self.insight_text.setText(self._compute_period_insight(session_rows, start, end, tasks_by_id))
 
         self._clear_layout(self.activity_layout)
         self.activity_cards = {}
@@ -1363,6 +1456,54 @@ class HistoryPage(QWidget):
     def _open_quick_stats(self, activity):
         if activity:
             self.request_quick_stats.emit(activity["activity_id"])
+
+    def _parse_activity_id(self, activity):
+        if not activity:
+            return None, None
+        activity_id = activity.get("activity_id") if isinstance(activity, dict) else None
+        if not activity_id:
+            return None, None
+        if activity_id.startswith("task:"):
+            try:
+                return "task", int(activity_id.split(":", 1)[1])
+            except Exception:
+                return "task", None
+        if activity_id.startswith("session:"):
+            try:
+                return "session", int(activity_id.split(":", 1)[1])
+            except Exception:
+                return "session", None
+        return None, None
+
+    def _confirm_delete_activity(self, activity):
+        kind, item_id = self._parse_activity_id(activity)
+        if kind is None or item_id is None:
+            return
+        if kind == "task":
+            title = activity.get("title") if isinstance(activity, dict) else None
+            msg = f"Remove this task{f' ({title})' if title else ''}?"
+            title_text = "Delete Task"
+        else:
+            msg = "Remove this session?"
+            title_text = "Delete Session"
+        confirm = QMessageBox.question(
+            self,
+            title_text,
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        conn = get_db_connection()
+        try:
+            if kind == "task":
+                conn.execute("DELETE FROM tasks WHERE id=?", (item_id,))
+            else:
+                conn.execute("DELETE FROM pomodoro_sessions WHERE id=?", (item_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        self.refresh_history()
 
     def _make_activity_card(self, activity, selected):
         card = ActivityCard(activity["activity_id"])
@@ -1457,14 +1598,22 @@ class HistoryPage(QWidget):
         view_btn = QPushButton("View Stats")
         view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         view_btn.setStyleSheet(
-            f"QPushButton {{ color: {self.colors['primary']}; background: transparent; border: none; font-size: 10px; font-weight: 900; }}"
+            f"QPushButton {{ color: {self.colors['primary']}; background-color: transparent; border: none; font-size: 10px; font-weight: bold; }}"
         )
         view_btn.clicked.connect(lambda: self._open_quick_stats(activity))
+
+        delete_btn = QPushButton("Delete")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.setStyleSheet(
+            f"QPushButton {{ color: {self.colors['bad']}; background-color: transparent; border: none; font-size: 10px; font-weight: bold; }}"
+        )
+        delete_btn.clicked.connect(lambda: self._confirm_delete_activity(activity))
 
         detail_layout.addLayout(eff_col)
         detail_layout.addLayout(focus_col)
         detail_layout.addStretch()
         detail_layout.addWidget(view_btn)
+        detail_layout.addWidget(delete_btn)
 
         card._detail_frame = detail_frame
         layout.addWidget(detail_frame)
