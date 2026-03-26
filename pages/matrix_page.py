@@ -7,6 +7,37 @@ from PyQt6.QtGui import QDrag, QCursor, QFont, QColor
 from database.db_manager import get_db_connection
 from resources.theme import get_theme, FONT_FAMILY
 
+PRIORITY_COLORS = {
+    "high": "#ef4444",
+    "medium": "#f59e0b",
+    "low": "#3b82f6",
+    "too low": "#94a3b8",
+}
+
+PRIORITY_BG_LIGHT = {
+    "high": "#fff5f5",
+    "medium": "#fffbeb",
+    "low": "#eff6ff",
+    "too low": "#f1f5f9",
+}
+
+PRIORITY_BG_DARK = {
+    "high": "#2b1515",
+    "medium": "#2b1b0a",
+    "low": "#0f1b2d",
+    "too low": "#1f2937",
+}
+
+
+def _priority_key(urgent, important):
+    if urgent and important:
+        return "high"
+    if not urgent and important:
+        return "medium"
+    if urgent and not important:
+        return "low"
+    return "too low"
+
 # --- 1. DRAGGABLE CARD ---
 class TaskCard(QFrame):
     def __init__(self, task_id, title, theme_mode="Light"):
@@ -112,7 +143,7 @@ class TaskCard(QFrame):
 
 # --- 2. DROP ZONE (QUADRANT) ---
 class Quadrant(QFrame):
-    def __init__(self, title, sub, bg_color, border_color, text_color, urgent, important, parent_mx):
+    def __init__(self, title, sub, urgent, important, parent_mx):
         super().__init__()
         self.setAcceptDrops(True)
         self.u_target = urgent
@@ -121,28 +152,16 @@ class Quadrant(QFrame):
         self.current_theme = "Light"
         self.ui_scale = 1.0
 
-        # Save Light Mode Colors
-        self.light_bg = bg_color
-        self.light_border = border_color
-        self.light_text = text_color
-        
-        # Define Dark Mode Colors based on Quadrant Type
-        if urgent and important: # Do First (Red)
-            self.dark_bg = "#2C1A1A"  # Dark Red
-            self.dark_border = "#5c2b2b"
-            self.dark_text = "#fc8181" 
-        elif not urgent and important: # Schedule (Green)
-            self.dark_bg = "#1C2B22" # Dark Green
-            self.dark_border = "#276749"
-            self.dark_text = "#68d391"
-        elif urgent and not important: # Delegate (Orange)
-            self.dark_bg = "#2C2218" # Dark Orange
-            self.dark_border = "#7b341e"
-            self.dark_text = "#f6ad55"
-        else: # Eliminate (Gray)
-            self.dark_bg = "#1A202C" # Dark Gray
-            self.dark_border = "#4a5568"
-            self.dark_text = "#cbd5e0"
+        priority_key = _priority_key(urgent, important)
+        # Light Mode Colors (match Tasks priority palette)
+        self.light_bg = PRIORITY_BG_LIGHT[priority_key]
+        self.light_border = PRIORITY_COLORS[priority_key]
+        self.light_text = PRIORITY_COLORS[priority_key]
+
+        # Dark Mode Colors (same priority hues)
+        self.dark_bg = PRIORITY_BG_DARK[priority_key]
+        self.dark_border = PRIORITY_COLORS[priority_key]
+        self.dark_text = PRIORITY_COLORS[priority_key]
 
         self.title_str = title
         self.sub_str = sub
@@ -379,17 +398,13 @@ class EisenhowerMatrix(QWidget):
         self.grid_layout.setSpacing(25)
         
         # Initialize Quadrants
-        self.q1 = Quadrant("Urgent & Important", "Do First", 
-                           "#fff5f5", "#feb2b2", "#c53030", True, True, self)
-        
-        self.q2 = Quadrant("Important, Not Urgent", "Schedule", 
-                           "#f0fff4", "#9ae6b4", "#2f855a", False, True, self)
-        
-        self.q3 = Quadrant("Urgent, Not Important", "Delegate", 
-                           "#fffaf0", "#fbd38d", "#c05621", True, False, self)
-        
-        self.q4 = Quadrant("Not Urgent, Not Important", "Eliminate", 
-                           "#edf2f7", "#cbd5e0", "#4a5568", False, False, self)
+        self.q1 = Quadrant("Urgent & Important", "Do First", True, True, self)
+
+        self.q2 = Quadrant("Important, Not Urgent", "Schedule", False, True, self)
+
+        self.q3 = Quadrant("Urgent, Not Important", "Delegate", True, False, self)
+
+        self.q4 = Quadrant("Not Urgent, Not Important", "Eliminate", False, False, self)
         for q in (self.q1, self.q2, self.q3, self.q4):
             q.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             q.setMinimumHeight(160)

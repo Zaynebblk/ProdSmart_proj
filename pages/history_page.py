@@ -1091,13 +1091,19 @@ class HistoryPage(QWidget):
             pass
 
     def _weeks_in_month(self, year, month):
-        days_in_month = calendar.monthrange(year, month)[1]
-        return 5 if days_in_month > 28 else 4
+        return 4
 
     def _update_week_combo(self, year, month, selected_week=None):
         if selected_week is None:
             selected_week = 1
         weeks_count = self._weeks_in_month(year, month)
+        try:
+            today = datetime.now().date()
+            if year == today.year and month == today.month:
+                current_week = self._month_week_index(today)
+                weeks_count = max(1, min(weeks_count, current_week))
+        except Exception:
+            pass
         selected_week = max(1, min(selected_week, weeks_count))
         self.week_combo.blockSignals(True)
         self.week_combo.clear()
@@ -1144,7 +1150,10 @@ class HistoryPage(QWidget):
         start = self._month_week_start(year, month, week)
         days_in_month = calendar.monthrange(year, month)[1]
         end_of_month = datetime(year, month, days_in_month).date()
-        end = min(start + timedelta(days=6), end_of_month)
+        if week >= self._weeks_in_month(year, month):
+            end = end_of_month
+        else:
+            end = min(start + timedelta(days=6), end_of_month)
         prev_end = start - timedelta(days=1)
         prev_start = prev_end - timedelta(days=6)
         return start, end, prev_start, prev_end

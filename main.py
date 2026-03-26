@@ -14,15 +14,86 @@ from resources.theme import get_theme, FONT_FAMILY
 
 _LAST_QSS_INFO = None
 
-def _app_icon_path():
+def _app_logo_path():
     root_dir = os.path.dirname(os.path.abspath(__file__))
     png_path = os.path.join(root_dir, "ProdSmart.png")
     ico_path = os.path.join(root_dir, "ProdSmart.ico")
-    # Prefer the PNG logo if present, so the window/taskbar icon matches the brand logo.
+    # Prefer PNG for in-app logo rendering.
     if os.path.exists(png_path):
         return png_path
     if os.path.exists(ico_path):
         return ico_path
+    return None
+
+
+def _app_icon_path():
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    png_path = os.path.join(root_dir, "ProdSmart.png")
+    ico_path = os.path.join(root_dir, "ProdSmart.ico")
+    # Prefer ICO on Windows so the taskbar icon reliably shows.
+    if os.name == "nt" and os.path.exists(ico_path):
+        return ico_path
+    if os.path.exists(png_path):
+        return png_path
+    if os.path.exists(ico_path):
+        return ico_path
+    return None
+
+
+def _load_app_icon():
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    ico_path = os.path.join(root_dir, "ProdSmart.ico")
+    png_path = os.path.join(root_dir, "ProdSmart.png")
+    icon = QIcon()
+    if os.path.exists(ico_path):
+        icon.addFile(ico_path)
+    # Ensure a PNG-backed pixmap is available as a fallback.
+    if os.path.exists(png_path):
+        icon.addFile(png_path)
+        if icon.isNull():
+            pix = QPixmap(png_path)
+            if not pix.isNull():
+                icon = QIcon(pix)
+    return icon
+
+
+def _set_windows_app_id():
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("prodsmart.app.1.0")
+    except Exception:
+        pass
+
+
+def _force_windows_app_icon(hwnd, icon_path):
+    if os.name != "nt" or not icon_path:
+        return None
+    try:
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x00000010
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        hicon = ctypes.windll.user32.LoadImageW(
+            None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE
+        )
+        if hicon:
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+            try:
+                GCLP_HICON = -14
+                GCLP_HICONSM = -34
+                set_class = getattr(ctypes.windll.user32, "SetClassLongPtrW", None)
+                if set_class is None:
+                    set_class = ctypes.windll.user32.SetClassLongW
+                set_class(hwnd, GCLP_HICON, hicon)
+                set_class(hwnd, GCLP_HICONSM, hicon)
+            except Exception:
+                pass
+            return hicon
+    except Exception:
+        pass
     return None
 
 def _install_qss_sanitizer():
@@ -165,17 +236,23 @@ class MainApp(QMainWindow):
         self.setWindowTitle("ProdSmart")
         self.resize(1200, 800)
         self.setMinimumSize(640, 420)
+        try:
+            self.setWindowFlag(Qt.WindowType.WindowSystemMenuHint, True)
+            self.setWindowFlag(Qt.WindowType.WindowTitleHint, True)
+            self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+            self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+            self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
+        except Exception:
+            pass
 
         # --- SET WINDOW & TASKBAR ICON ---
-        icon_path = _app_icon_path()
-        if icon_path:
-            self.setWindowIcon(QIcon(icon_path))
+        self._app_icon = _load_app_icon()
+        if not self._app_icon.isNull():
+            self.setWindowIcon(self._app_icon)
+        self._win_hicon = None
 
-        # ID for Windows Taskbar
-        try:
-            if os.name == 'nt':
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('prodsmart.app.1.0')
-        except: pass
+        # ID for Windows Taskbar (also set before QApplication as a fallback)
+        _set_windows_app_id()
 
         self.central_widget = QWidget()
         self.central_widget.setMinimumSize(0, 0)
@@ -209,8 +286,9 @@ class MainApp(QMainWindow):
         logo_icon = QLabel()
         logo_icon.setObjectName("SidebarLogo")
         self._logo_pixmap = None
-        if os.path.exists("ProdSmart.png"):
-            pixmap = QPixmap("ProdSmart.png")
+        logo_path = _app_logo_path()
+        if logo_path:
+            pixmap = QPixmap(logo_path)
             if not pixmap.isNull():
                 self._logo_pixmap = pixmap
         logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -539,6 +617,15 @@ class MainApp(QMainWindow):
     def _update_sidebar_logo(self):
         if not hasattr(self, "logo_icon"):
             return
+        if self._logo_pixmap is None:
+            try:
+                logo_path = _app_logo_path()
+                if logo_path:
+                    pixmap = QPixmap(logo_path)
+                    if not pixmap.isNull():
+                        self._logo_pixmap = pixmap
+            except Exception:
+                pass
         sidebar_w = self.sidebar.width() if hasattr(self, "sidebar") else self.width()
         sidebar_h = self.sidebar.height() if hasattr(self, "sidebar") else self.height()
         if hasattr(self, "sidebar_header_layout"):
@@ -604,6 +691,17 @@ class MainApp(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_sidebar_logo()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_app_icon") and self._app_icon and not self._app_icon.isNull():
+            self.setWindowIcon(self._app_icon)
+        icon_path = _app_icon_path()
+        if icon_path:
+            try:
+                self._win_hicon = _force_windows_app_icon(int(self.winId()), icon_path)
+            except Exception:
+                pass
 
     # --- STYLE LIGHT ---
     def set_light_theme(self):
@@ -776,13 +874,16 @@ class _TransientWindowBlocker(QObject):
 if __name__ == "__main__":
     try:
         init_db()
+        _set_windows_app_id()
         app = QApplication(sys.argv)
         _install_qss_sanitizer()
         _install_qss_debug()
         
         icon_path = _app_icon_path()
         if icon_path:
-            app.setWindowIcon(QIcon(icon_path))
+            icon = _load_app_icon()
+            if not icon.isNull():
+                app.setWindowIcon(icon)
             
         # Exit cleanly on Ctrl+C without a traceback.
         signal.signal(signal.SIGINT, lambda *_: app.quit())

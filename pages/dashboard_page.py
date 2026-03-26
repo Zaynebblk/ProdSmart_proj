@@ -1220,19 +1220,7 @@ class DashboardPage(QWidget):
             except Exception:
                 pass
 
-        if not getattr(self, "_debug_grid_once", False):
-            try:
-                top_min = self.top_grid_container.minimumHeight() if hasattr(self, "top_grid_container") else None
-                weekly_min = self.weekly_grid_container.minimumHeight() if hasattr(self, "weekly_grid_container") else None
-                print(
-                    f"[DashDebug] top_grid: count={top_count} hint={top_hint} fallback={top_fallback} minH={top_min}"
-                )
-                print(
-                    f"[DashDebug] weekly_grid: count={weekly_count} hint={weekly_hint} fallback={weekly_fallback} minH={weekly_min}"
-                )
-            except Exception as exc:
-                print(f"[DashDebug] error: {exc}")
-            self._debug_grid_once = True
+        self._debug_grid_once = True
 
     def _grid_min_height(self, layout):
         if not layout:
