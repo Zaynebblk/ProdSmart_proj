@@ -8,9 +8,14 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPainterPath, QPen, QColor, QPixmap, QDesktopServices
 from PyQt6.QtCore import QUrl
+try:
+    from PyQt6.QtMultimedia import QSoundEffect
+except Exception:
+    QSoundEffect = None
 from database.db_manager import get_db_connection
 from pages.settings_page import Toggle
 from resources.theme import get_theme, FONT_FAMILY
+from resources.task_types import TASK_TYPE_LIMITS, normalize_task_type
 try:
     import PyQt6.sip as sip
 except Exception:
@@ -59,16 +64,21 @@ class PomodoroPage(QWidget):
         self._pre_focus_sound = None
         self._focus_assist_prompted = False
         self._force_system_focus_page = False
+        self._end_sound = None
+        self._suppress_next_phase_sound = False
 
         # Task-linked session state
         self.current_task_id = None
         self.current_task_title = None
         self.current_task_priority = None
+        self.current_task_type = None
         self.session_started_at = None
         self.session_task_id = None
         self.session_task_title = None
         self.session_task_priority = None
+        self.session_task_type = None
         self.session_duration_min = None
+        self._active_session_id = None
         self.plan_enabled = True
         self.plan_index = 0
         self.plan_phases = []
@@ -83,6 +93,7 @@ class PomodoroPage(QWidget):
         self.setup_ui()
         self._rebuild_plan_inputs()
         self._set_phase("focus", reset_time=True, notify=False)
+        self._recover_incomplete_sessions()
 
     def showEvent(self, event):
         """S'active quand on clique sur l'onglet"""
@@ -827,9 +838,30 @@ class PomodoroPage(QWidget):
         v_layout.addWidget(btn_up); v_layout.addWidget(btn_down)
         layout.addWidget(spin); layout.addWidget(btn_col)
 
+        spin._setting_label = lbl
+        spin._setting_container = container
         spin.valueChanged.connect(self.sync_settings)
         card.layout().addWidget(lbl); card.layout().addWidget(container)
         return spin
+
+    def _update_interval_dependent_inputs(self):
+        if not hasattr(self, "interval_input") or not hasattr(self, "short_input"):
+            return
+        try:
+            intervals = max(1, int(self.interval_input.value()))
+        except Exception:
+            intervals = 1
+        show_short = intervals > 1
+        label = getattr(self.short_input, "_setting_label", None)
+        container = getattr(self.short_input, "_setting_container", None)
+        if label is not None:
+            label.setVisible(show_short)
+        if container is not None:
+            container.setVisible(show_short)
+        try:
+            self.short_input.setEnabled(show_short)
+        except Exception:
+            pass
 
     def _add_plan_setting(self, label_text, default_val, max_val=180):
         return None
@@ -1058,6 +1090,8 @@ class PomodoroPage(QWidget):
                 self.plan_container.updateGeometry()
             except Exception:
                 pass
+        self._apply_task_type_constraints(self.current_task_type)
+        self._update_interval_dependent_inputs()
 
     def _apply_plan_styles(self):
         c = self._theme_colors or {}
@@ -1258,6 +1292,8 @@ class PomodoroPage(QWidget):
                     self._log_session(status="completed", duration_override=current_minutes)
                     self.sessions_completed += 1
                     self.sessions_count.setText(str(self.sessions_completed))
+                    if self._play_session_end_sound():
+                        self._suppress_next_phase_sound = True
 
                 self.plan_index += 1
                 if self.plan_index >= len(self.plan_phases):
@@ -1273,6 +1309,8 @@ class PomodoroPage(QWidget):
                     self._log_session(status="completed", duration_override=self.focus_input.value())
                     self.sessions_completed += 1
                     self.sessions_count.setText(str(self.sessions_completed))
+                    if self._play_session_end_sound():
+                        self._suppress_next_phase_sound = True
                     next_phase = self._next_break_phase(pending_focus=False)
                 else:
                     if self.phase == "long_break":
@@ -1283,7 +1321,7 @@ class PomodoroPage(QWidget):
                 self._set_phase(next_phase, reset_time=True, notify=True)
                 self._update_session_progress()
 
-            if self.auto_start:
+            if self.auto_start and self.phase == "focus":
                 self._start_timer()
             else:
                 self._update_start_button(resume=False)
@@ -1317,31 +1355,67 @@ class PomodoroPage(QWidget):
         self.current_task_id = None
         self.current_task_title = None
         self.current_task_priority = None
+        self.current_task_type = None
         if hasattr(self, "current_task_title_label"):
             self.current_task_title_label.setText("No Task Selected")
         if hasattr(self, "current_task_meta"):
             self.current_task_meta.setText("Session Type: -")
         self._set_phase("focus", reset_time=True, notify=False)
+        self._apply_task_type_constraints(None)
         self._update_start_button(resume=False)
         if not self._should_disable_start():
             accent = (self._theme_colors or {}).get("accent", "#3078CD")
             self.btn_start.setStyleSheet(f"background-color: {accent}; color: white; border-radius: 12px; font-weight: bold; border: none;")
 
-    def set_task(self, task_id, title, priority=None):
+    def set_task(self, task_id, title, priority=None, task_type=None):
         self.current_task_id = task_id
         self.current_task_title = title
         self.current_task_priority = normalize_priority(priority)
+        self.current_task_type = normalize_task_type(task_type)
         safe_title = title.strip() if title else "No Task Selected"
         if hasattr(self, "current_task_title_label"):
             self.current_task_title_label.setText(safe_title)
         if hasattr(self, "current_task_meta"):
+            parts = []
+            meta_lines = []
+            limits = TASK_TYPE_LIMITS.get(self.current_task_type)
+            if limits:
+                min_val, max_val = limits
+            else:
+                min_val, max_val = 1, 120
+            if self.current_task_type or self.current_task_priority:
+                meta_lines.append(
+                    f"You can choose only between {min_val} and {max_val} min session duration."
+                )
             if self.current_task_priority:
                 session_label = priority_session_label(self.current_task_priority)
-                self.current_task_meta.setText(f"Session Type: {session_label}")
+                parts.append(f"Session Type: {session_label}")
             else:
-                self.current_task_meta.setText("Session Type: -")
+                parts.append("Session Type: -")
+            if self.current_task_type:
+                parts.append(f"Task Type: {self.current_task_type}")
+            meta_lines.append("  ·  ".join(parts))
+            self.current_task_meta.setText("\n".join(meta_lines))
         if not self.timer.isActive():
             self._update_start_button(resume=False)
+        self._apply_task_type_constraints(self.current_task_type)
+
+    def prepare_recovery_break(self, prefer_long=True):
+        if self.timer.isActive():
+            if self.phase == "focus" and self.session_started_at is not None:
+                self._log_session(status="stopped")
+            self.timer.stop()
+        target_phase = "long_break" if prefer_long else "short_break"
+        if self.plan_phases:
+            target_idx = None
+            for idx, item in enumerate(self.plan_phases):
+                if item.get("phase") == target_phase:
+                    target_idx = idx
+                    break
+            if target_idx is not None:
+                self.plan_index = target_idx
+        self._set_phase(target_phase, reset_time=True, notify=True)
+        self._update_start_button(resume=False)
 
     def _has_task_selected(self):
         return self.current_task_id is not None and bool(str(self.current_task_title or "").strip())
@@ -1467,6 +1541,39 @@ class PomodoroPage(QWidget):
         show = self.phase == "focus" and self.session_started_at is not None
         self.btn_stop.setVisible(bool(show))
 
+    def _apply_task_type_constraints(self, task_type):
+        if not hasattr(self, "focus_input"):
+            return
+        limits = TASK_TYPE_LIMITS.get(task_type)
+        if limits:
+            min_val, max_val = limits
+        else:
+            min_val, max_val = 1, 120
+        try:
+            self.focus_input.setRange(int(min_val), int(max_val))
+        except Exception:
+            pass
+        try:
+            current = int(self.focus_input.value())
+            if current < min_val:
+                self.focus_input.setValue(int(min_val))
+            elif current > max_val:
+                self.focus_input.setValue(int(max_val))
+        except Exception:
+            pass
+        for spin in getattr(self, "plan_focus_spins", []):
+            if spin is None:
+                continue
+            try:
+                spin.setRange(int(min_val), int(max_val))
+                val = int(spin.value())
+                if val < min_val:
+                    spin.setValue(int(min_val))
+                elif val > max_val:
+                    spin.setValue(int(max_val))
+            except Exception:
+                continue
+
     def _set_phase(self, phase, reset_time=True, notify=False):
         self.phase = phase
         if reset_time:
@@ -1478,6 +1585,7 @@ class PomodoroPage(QWidget):
             self.session_task_id = None
             self.session_task_title = None
             self.session_task_priority = None
+            self.session_task_type = None
             self.session_duration_min = None
         self._update_phase_badge()
         self._update_next_label()
@@ -1501,7 +1609,9 @@ class PomodoroPage(QWidget):
             self.session_task_id = self.current_task_id
             self.session_task_title = self.current_task_title
             self.session_task_priority = self.current_task_priority
+            self.session_task_type = self.current_task_type
             self.session_duration_min = self._phase_minutes(self.phase)
+            self._start_session_record()
         self._update_stop_button_visibility()
 
     def _ensure_tray(self):
@@ -1509,10 +1619,21 @@ class PomodoroPage(QWidget):
             return
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ProdSmart.png")
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        icon_path = self._app_icon_path()
+        icon = QIcon(icon_path) if icon_path else QIcon()
         self._tray = QSystemTrayIcon(icon, self)
         self._tray.setVisible(True)
+
+    def _app_icon_path(self):
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        png_path = os.path.join(root_dir, "ProdSmart.png")
+        ico_path = os.path.join(root_dir, "ProdSmart.ico")
+        # Prefer the PNG logo if present, so notifications use the same brand logo.
+        if os.path.exists(png_path):
+            return png_path
+        if os.path.exists(ico_path):
+            return ico_path
+        return None
 
     def _show_notification(self, title, message):
         if not self.enable_notifications:
@@ -1522,6 +1643,28 @@ class PomodoroPage(QWidget):
             self._tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
         else:
             print(f"[Pomodoro] {title}: {message}")
+
+    def _pomodoro_end_sound_path(self):
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        return os.path.join(root_dir, "resources", "mixkit-happy-bells-notification-937.wav")
+
+    def _play_session_end_sound(self):
+        if not self.sound_effects:
+            return False
+        sound_path = self._pomodoro_end_sound_path()
+        if QSoundEffect is None:
+            QApplication.beep()
+            return True
+        if not os.path.exists(sound_path):
+            QApplication.beep()
+            return True
+        if self._end_sound is None:
+            self._end_sound = QSoundEffect(self)
+            self._end_sound.setLoopCount(1)
+            self._end_sound.setVolume(0.85)
+        self._end_sound.setSource(QUrl.fromLocalFile(sound_path))
+        self._end_sound.play()
+        return True
 
     def _play_sound(self):
         if not self.sound_effects:
@@ -1535,6 +1678,9 @@ class PomodoroPage(QWidget):
         label = self._phase_label(phase)
         mins = self._phase_minutes(phase)
         self._show_notification("Pomodoro", f"{label} started ({mins} min)")
+        if self._suppress_next_phase_sound:
+            self._suppress_next_phase_sound = False
+            return
         self._play_sound()
 
     def _update_break_tips_visibility(self):
@@ -1708,6 +1854,82 @@ class PomodoroPage(QWidget):
             total_seconds = 0
         return max(1, int(round(total_seconds / 60.0))) if total_seconds > 0 else 0
 
+    def _recover_incomplete_sessions(self):
+        """Finalize any in-progress sessions left by a forced app stop."""
+        try:
+            conn = get_db_connection()
+        except Exception:
+            return
+        try:
+            rows = conn.execute(
+                "SELECT id, started_at FROM pomodoro_sessions "
+                "WHERE status='in_progress' OR ended_at IS NULL OR ended_at=''"
+            ).fetchall()
+            if not rows:
+                conn.close()
+                return
+            now = datetime.now()
+            now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+            for row in rows:
+                try:
+                    sid = row[0]
+                    started_at = row[1]
+                    started_dt = None
+                    if started_at:
+                        try:
+                            started_dt = datetime.strptime(str(started_at), "%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            started_dt = None
+                    if started_dt is None:
+                        started_dt = now
+                    delta_sec = max(0, (now - started_dt).total_seconds())
+                    duration_min = 0 if delta_sec <= 0 else max(1, int(round(delta_sec / 60.0)))
+                    conn.execute(
+                        "UPDATE pomodoro_sessions SET ended_at=?, duration_min=?, status=? WHERE id=?",
+                        (now_str, int(duration_min), "stopped", sid),
+                    )
+                except Exception:
+                    continue
+            conn.commit()
+        except Exception as exc:
+            print("DB Error (Pomodoro recovery):", exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _start_session_record(self):
+        if self._active_session_id is not None:
+            return
+        if self.session_started_at is None:
+            self.session_started_at = datetime.now()
+        try:
+            conn = get_db_connection()
+            cur = conn.execute(
+                "INSERT INTO pomodoro_sessions (task_id, task_title, task_priority, task_type, started_at, ended_at, duration_min, status) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    self.session_task_id,
+                    self.session_task_title,
+                    self.session_task_priority or self.current_task_priority,
+                    self.session_task_type or self.current_task_type,
+                    self.session_started_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    None,
+                    0,
+                    "in_progress",
+                ),
+            )
+            try:
+                self._active_session_id = cur.lastrowid
+            except Exception:
+                self._active_session_id = None
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            print("DB Error (Pomodoro start):", exc)
+            self._active_session_id = None
+
     def _log_session(self, status="completed", duration_override=None):
         if self.session_started_at is None:
             self.session_started_at = datetime.now()
@@ -1718,18 +1940,30 @@ class PomodoroPage(QWidget):
             duration_min = self._elapsed_minutes()
         try:
             conn = get_db_connection()
-            conn.execute(
-                "INSERT INTO pomodoro_sessions (task_id, task_title, task_priority, started_at, ended_at, duration_min, status) VALUES (?,?,?,?,?,?,?)",
-                (
-                    self.session_task_id,
-                    self.session_task_title,
-                    self.session_task_priority or self.current_task_priority,
-                    self.session_started_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    ended_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    int(duration_min),
-                    status,
-                ),
-            )
+            if self._active_session_id is not None:
+                conn.execute(
+                    "UPDATE pomodoro_sessions SET ended_at=?, duration_min=?, status=? WHERE id=?",
+                    (
+                        ended_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        int(duration_min),
+                        status,
+                        self._active_session_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO pomodoro_sessions (task_id, task_title, task_priority, task_type, started_at, ended_at, duration_min, status) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        self.session_task_id,
+                        self.session_task_title,
+                        self.session_task_priority or self.current_task_priority,
+                        self.session_task_type or self.current_task_type,
+                        self.session_started_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        ended_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        int(duration_min),
+                        status,
+                    ),
+                )
             conn.commit()
             conn.close()
         except Exception as exc:
@@ -1740,4 +1974,5 @@ class PomodoroPage(QWidget):
             self.session_task_title = None
             self.session_task_priority = None
             self.session_duration_min = None
+            self._active_session_id = None
         

@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox,
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty
 from PyQt6.QtGui import QPainter, QColor
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.task_types import TASK_TYPES, UNCATEGORIZED_LABEL
 
 # --- CUSTOM TOGGLE SWITCH CLASS ---
 class Toggle(QCheckBox):
@@ -198,6 +199,20 @@ class SettingsPage(QWidget):
         result_reminders = self.create_toggle_row("Task reminders", "Remind me about upcoming deadlines")
         self.toggle_reminders = result_reminders['toggle']
         tasks_layout.addLayout(result_reminders['layout'])
+
+        # Task Type Filters
+        lbl_type_filters = QLabel("Task type filters")
+        lbl_type_filters.setObjectName("SettingsLabel")
+        lbl_type_filters.setStyleSheet("font-size: 14px; font-weight: bold;")
+        tasks_layout.addWidget(lbl_type_filters)
+
+        self.type_checks = {}
+        for type_label in TASK_TYPES + [UNCATEGORIZED_LABEL]:
+            cb = QCheckBox(type_label)
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            cb.setChecked(True)
+            self.type_checks[type_label] = cb
+            tasks_layout.addWidget(cb)
         
         # Reminder repeat interval (minutes)
         lbl_repeat = QLabel("Reminder repeat (min)")
@@ -328,6 +343,15 @@ class SettingsPage(QWidget):
                     self.toggle_notify.setChecked(data.get("enable_notifications", True))
                     self.toggle_autostart.setChecked(data.get("auto_start_pomodoro", False))
                     self.toggle_sound.setChecked(data.get("sound_effects", True))
+
+                    type_filters = data.get("task_type_filters")
+                    if isinstance(type_filters, list) and type_filters:
+                        allowed = set(str(t) for t in type_filters)
+                        for label, cb in self.type_checks.items():
+                            cb.setChecked(label in allowed)
+                    else:
+                        for cb in self.type_checks.values():
+                            cb.setChecked(True)
         except Exception as e:
             print(f"Error loading settings: {e}")
 
@@ -340,7 +364,8 @@ class SettingsPage(QWidget):
             "reminder_repeat_minutes": int(self.combo_repeat.currentText()),
             "enable_notifications": self.toggle_notify.isChecked(),
             "auto_start_pomodoro": self.toggle_autostart.isChecked(),
-            "sound_effects": self.toggle_sound.isChecked()
+            "sound_effects": self.toggle_sound.isChecked(),
+            "task_type_filters": [label for label, cb in self.type_checks.items() if cb.isChecked()],
         }
         
         json_path = self.get_settings_path()
@@ -362,6 +387,7 @@ class SettingsPage(QWidget):
         self.setStyleSheet(
             f"QWidget#SettingsPage {{ background: {c['bg']}; font-family: '{FONT_FAMILY}', 'Segoe UI'; }}"
             f"QLabel#SettingsLabel {{ color: {c['text']}; }}"
+            f"QCheckBox {{ color: {c['text']}; font-size: 12px; }}"
             f"QLabel#SettingsSection {{ color: {deep}; font-size: 18px; font-weight: 900; "
             f"padding-bottom: 6px; border-bottom: 2px solid {accent_soft}; letter-spacing: 0.5px; }}"
         )

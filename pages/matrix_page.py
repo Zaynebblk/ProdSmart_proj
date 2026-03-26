@@ -1,7 +1,7 @@
 import sqlite3
 from PyQt6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout, QLabel, QFrame, 
-                             QScrollArea, QHBoxLayout, QGraphicsDropShadowEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QMimeData, QSize, pyqtSignal, QTimer
+                             QScrollArea, QHBoxLayout, QGraphicsDropShadowEffect, QSizePolicy, QMessageBox)
+from PyQt6.QtCore import Qt, QMimeData, QSize, pyqtSignal, QTimer, QDate
 from PyQt6.QtGui import QDrag, QCursor, QFont, QColor
 
 from database.db_manager import get_db_connection
@@ -291,6 +291,38 @@ class Quadrant(QFrame):
     def dropEvent(self, event):
         t_id = event.mimeData().text()
         conn = get_db_connection()
+
+        # Enforce urgency based on deadline date.
+        due_date = None
+        try:
+            row = conn.execute("SELECT due_date FROM tasks WHERE id=?", (t_id,)).fetchone()
+            if row:
+                due_date = row[0]
+        except Exception:
+            due_date = None
+
+        due_is_urgent = False
+        try:
+            if due_date:
+                due = QDate.fromString(str(due_date), "yyyy-MM-dd")
+                if due.isValid():
+                    days_to = QDate.currentDate().daysTo(due)
+                    due_is_urgent = days_to <= 2
+        except Exception:
+            due_is_urgent = False
+
+        if bool(self.u_target) != bool(due_is_urgent):
+            try:
+                QMessageBox.warning(
+                    self,
+                    "Priority Locked",
+                    "modifie deadline date in the tasks page before"
+                )
+            except Exception:
+                pass
+            conn.close()
+            event.ignore()
+            return
         
         p_text = "too low"
         if self.u_target and self.i_target:

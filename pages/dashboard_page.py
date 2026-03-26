@@ -11,9 +11,10 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QProgressBar,
     QSizePolicy,
-    QGridLayout
+    QGridLayout,
+    QLayout
 )
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QPainter, QPainterPath, QPen, QLinearGradient, QColor
 from database.db_manager import get_db_connection
 from resources.theme import get_theme, FONT_FAMILY
@@ -23,6 +24,7 @@ from resources.priority import (
     quadrant_from_flags,
     PRIORITY_LEVELS,
 )
+from resources.task_types import TASK_TYPES, TASK_TYPE_COLORS, UNCATEGORIZED_LABEL, normalize_task_type
 
 
 def _heatmap_time_labels_2h():
@@ -648,7 +650,128 @@ class PriorityBreakdownChart(QFrame):
                 painter.drawText(QPointF(outside_x + padding_x, text_y), value_text)
         finally:
             painter.end()
+
+
+class TypeBreakdownChart(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.order = TASK_TYPES + [UNCATEGORIZED_LABEL]
+        self.values = {label: 0 for label in self.order}
+        self.colors = {}
+        self.is_dark = False
+        self.setMinimumHeight(200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def set_data(self, values):
+        if values:
+            for label in self.order:
+                self.values[label] = int(values.get(label, 0) or 0)
+        self.update()
+
+    def set_theme(self, colors, theme):
+        self.colors = colors or {}
+        self.is_dark = theme == "Dark"
+        self.update()
+
+    def _color_for_type(self, label):
+        hex_color = TASK_TYPE_COLORS.get(label)
+        if hex_color:
+            return QColor(hex_color)
+        return QColor(self.colors.get("accent2", "#82AFF2"))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            rect = QRectF(self.rect())
+            if not self.order:
+                return
+
+            values = [self.values.get(label, 0) for label in self.order]
+            max_val = max(values) if values else 0
+
+            label_font = painter.font()
+            label_font.setPointSize(9)
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            label_metrics = painter.fontMetrics()
+            max_label_w = max(
+                (label_metrics.horizontalAdvance(label) for label in self.order),
+                default=60,
+            )
+
+            left_pad = max(80, max_label_w + 14)
+            right_pad = 10
+            top_pad = 12
+            bottom_pad = 8
+
+            value_font = painter.font()
+            value_font.setPointSize(9)
+            value_font.setBold(True)
+            painter.setFont(value_font)
+            value_metrics = painter.fontMetrics()
+            max_value_text = f"{max_val} min"
+            value_text_w = value_metrics.horizontalAdvance(max_value_text)
+
+            value_gap = 10
+            chart_w = rect.width() - left_pad - right_pad - value_text_w - value_gap
+            chart_w = max(30, chart_w)
+
+            available_h = rect.height() - top_pad - bottom_pad
+            rows = len(self.order)
+            row_h = available_h / max(1, rows)
+            bar_h = min(16, max(8, row_h * 0.55))
+            row_gap = max(6, row_h - bar_h)
+
+            label_color = QColor(self.colors.get("text", "#113356"))
+            value_color = QColor(self.colors.get("sub", "#94A3B8"))
+            track_color = QColor(self.colors.get("border", "#BAD2E0"))
+            track_color.setAlpha(80)
+
+            if max_val == 0:
+                painter.setPen(value_color)
+                painter.drawText(
+                    QPointF(rect.left() + 10, rect.center().y()),
+                    "No type sessions yet.",
+                )
+                return
+
+            for idx, label in enumerate(self.order):
+                value = self.values.get(label, 0)
+                y = rect.top() + top_pad + idx * (bar_h + row_gap)
+                bar_x = rect.left() + left_pad
+
+                # Label
+                painter.setPen(label_color)
+                painter.setFont(label_font)
+                painter.drawText(QPointF(rect.left() + 8, y + bar_h), label)
+
+                # Track
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(track_color)
+                track_rect = QRectF(bar_x, y, chart_w, bar_h)
+                painter.drawRoundedRect(track_rect, 6, 6)
+
+                # Bar
+                bar_w = 0 if max_val == 0 else (value / max_val) * chart_w
+                if value > 0:
+                    bar_w = max(3, bar_w)
+                bar_rect = QRectF(bar_x, y, bar_w, bar_h)
+                painter.setBrush(self._color_for_type(label))
+                painter.drawRoundedRect(bar_rect, 6, 6)
+
+                # Value text
+                value_text = f"{value} min"
+                painter.setFont(value_font)
+                painter.setPen(value_color if value == 0 else label_color)
+                text_x = rect.right() - right_pad - value_metrics.horizontalAdvance(value_text)
+                painter.drawText(QPointF(text_x, y + bar_h), value_text)
+        finally:
+            painter.end()
 class DashboardPage(QWidget):
+    action_requested = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.current_theme = "Light"
@@ -659,6 +782,8 @@ class DashboardPage(QWidget):
         self.badges = []
         self.progress_bars = []
         self.energy_bars = []
+        self.energy_label = None
+        self.energy_note = None
         self.consistency_chart = None
         self.heatmap_chart = None
         self.velocity_chart = None
@@ -669,6 +794,8 @@ class DashboardPage(QWidget):
         self.refresh_button = None
         self.schedule_button = None
         self.header_status = None
+        self.type_value_labels = {}
+        self.type_chart = None
         self._colors = {}
         self.pomo_minutes_week = 0
         self.pomo_sessions_week = 0
@@ -682,6 +809,7 @@ class DashboardPage(QWidget):
         self.pomo_day_sessions = [0, 0, 0, 0, 0, 0, 0]
         self.pomo_day_sessions = [0, 0, 0, 0, 0, 0, 0]
         self.priority_chart = None
+        self._debug_grid_once = False
 
         self.setObjectName("DashboardPage")
         self._set_default_metrics()
@@ -755,7 +883,12 @@ class DashboardPage(QWidget):
         self.content.addWidget(header)
 
         # Top cards
-        self.top_grid = QGridLayout()
+        self.top_grid_container = QWidget()
+        self.top_grid_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.top_grid_container.setStyleSheet("background: transparent;")
+        self.top_grid_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.top_grid = QGridLayout(self.top_grid_container)
+        self.top_grid.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.top_grid.setSpacing(14)
 
         focus_card = self._make_card("Focus Score")
@@ -786,29 +919,7 @@ class DashboardPage(QWidget):
         energy_layout = energy_card.layout()
         energy_layout.setSpacing(10)
 
-        bars_row = QHBoxLayout()
-        bars_row.setSpacing(6)
-        bar_heights = [12, 20, 28, 22, 14]
-        for h in bar_heights:
-            bar = QFrame()
-            bar.setFixedSize(10, h)
-            bar.setObjectName("DashEnergyBar")
-            bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            self.energy_bars.append(bar)
-            bars_row.addWidget(bar, alignment=Qt.AlignmentFlag.AlignBottom)
-        bars_row.addStretch()
-
-        self.energy_label = QLabel("Peak")
-        self.energy_label.setObjectName("DashEnergy")
-        self.labels_main.append(self.energy_label)
-
-        self.energy_note = QLabel("Next drop: 3:00 PM")
-        self.labels_sub.append(self.energy_note)
-
-        energy_layout.addLayout(bars_row)
-        energy_layout.addWidget(self.energy_label)
-        energy_layout.addWidget(self.energy_note)
-        energy_layout.addStretch()
+        energy_card.setVisible(False)
 
         pomodoro_card = self._make_card("Pomodoro")
         pomodoro_layout = pomodoro_card.layout()
@@ -832,9 +943,10 @@ class DashboardPage(QWidget):
         pomodoro_layout.addWidget(self.pomo_best_label)
         pomodoro_layout.addStretch()
 
-        self._top_cards = [focus_card, energy_card, pomodoro_card]
+        self._top_cards = [focus_card, pomodoro_card]
         self._layout_card_grid(self.top_grid, self._top_cards, min_width=240, max_cols=3)
-        self.content.addLayout(self.top_grid)
+        self.content.addWidget(self.top_grid_container)
+        self._sync_grid_container_heights()
 
         # AI Insights
         ai_header = self._section_header("AI Insights")
@@ -952,6 +1064,24 @@ class DashboardPage(QWidget):
         self.consistency_chart = FocusConsistencyChart()
         consistency_layout.addWidget(self.consistency_chart)
 
+        type_card = self._make_card("Time by Type")
+        type_layout = type_card.layout()
+        type_layout.setSpacing(8)
+        self.type_chart = TypeBreakdownChart()
+        type_layout.addWidget(self.type_chart)
+        self.type_value_labels = {}
+        for type_label in TASK_TYPES + [UNCATEGORIZED_LABEL]:
+            row = QHBoxLayout()
+            lbl = QLabel(type_label)
+            val = QLabel("0 min")
+            self.labels_sub.append(lbl)
+            self.labels_main.append(val)
+            row.addWidget(lbl)
+            row.addStretch()
+            row.addWidget(val)
+            type_layout.addLayout(row)
+            self.type_value_labels[type_label] = val
+
         heatmap = self._make_card("Priority Focus Heatmap")
         heatmap_layout = heatmap.layout()
         heatmap_layout.setSpacing(10)
@@ -966,11 +1096,17 @@ class DashboardPage(QWidget):
         self.velocity_chart = VelocityChartWidget()
         velocity_layout.addWidget(self.velocity_chart)
 
-        self.weekly_grid = QGridLayout()
+        self.weekly_grid_container = QWidget()
+        self.weekly_grid_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.weekly_grid_container.setStyleSheet("background: transparent;")
+        self.weekly_grid_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.weekly_grid = QGridLayout(self.weekly_grid_container)
+        self.weekly_grid.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.weekly_grid.setSpacing(14)
-        self._weekly_cards = [completion, consistency]
+        self._weekly_cards = [completion, consistency, type_card]
         self._layout_card_grid(self.weekly_grid, self._weekly_cards, min_width=320, max_cols=2)
-        self.content.addLayout(self.weekly_grid)
+        self.content.addWidget(self.weekly_grid_container)
+        self._sync_grid_container_heights()
 
         pomodoro_trend = self._make_card("Pomodoro Trend")
         pomodoro_trend_layout = pomodoro_trend.layout()
@@ -990,6 +1126,7 @@ class DashboardPage(QWidget):
         self.content.addWidget(velocity)
 
         self.content.addStretch()
+        QTimer.singleShot(0, self._sync_grid_container_heights)
 
     def _make_card(self, title_text):
         card = QFrame()
@@ -1009,7 +1146,7 @@ class DashboardPage(QWidget):
         return card
 
     def _layout_card_grid(self, layout, widgets, min_width=260, max_cols=None):
-        if not layout:
+        if layout is None:
             return
         while layout.count():
             layout.takeAt(0)
@@ -1039,6 +1176,106 @@ class DashboardPage(QWidget):
             self._layout_card_grid(self.top_grid, self._top_cards, min_width=240, max_cols=3)
         if hasattr(self, "weekly_grid") and hasattr(self, "_weekly_cards"):
             self._layout_card_grid(self.weekly_grid, self._weekly_cards, min_width=320, max_cols=2)
+        self._sync_grid_container_heights()
+
+    def _sync_grid_container_heights(self):
+        top_hint = None
+        top_fallback = None
+        weekly_hint = None
+        weekly_fallback = None
+        top_count = None
+        weekly_count = None
+        if hasattr(self, "top_grid_container") and hasattr(self, "top_grid"):
+            try:
+                self.top_grid.activate()
+                self.top_grid_container.adjustSize()
+                top_hint = self.top_grid_container.sizeHint().height()
+                try:
+                    top_count = self.top_grid.count()
+                except Exception:
+                    top_count = None
+                top_h = top_hint or 0
+                if top_h <= 0:
+                    top_fallback = self._grid_min_height(self.top_grid)
+                    top_h = top_fallback
+                if top_h:
+                    self.top_grid_container.setMinimumHeight(top_h)
+            except Exception:
+                pass
+        if hasattr(self, "weekly_grid_container") and hasattr(self, "weekly_grid"):
+            try:
+                self.weekly_grid.activate()
+                self.weekly_grid_container.adjustSize()
+                weekly_hint = self.weekly_grid_container.sizeHint().height()
+                try:
+                    weekly_count = self.weekly_grid.count()
+                except Exception:
+                    weekly_count = None
+                weekly_h = weekly_hint or 0
+                if weekly_h <= 0:
+                    weekly_fallback = self._grid_min_height(self.weekly_grid)
+                    weekly_h = weekly_fallback
+                if weekly_h:
+                    self.weekly_grid_container.setMinimumHeight(weekly_h)
+            except Exception:
+                pass
+
+        if not getattr(self, "_debug_grid_once", False):
+            try:
+                top_min = self.top_grid_container.minimumHeight() if hasattr(self, "top_grid_container") else None
+                weekly_min = self.weekly_grid_container.minimumHeight() if hasattr(self, "weekly_grid_container") else None
+                print(
+                    f"[DashDebug] top_grid: count={top_count} hint={top_hint} fallback={top_fallback} minH={top_min}"
+                )
+                print(
+                    f"[DashDebug] weekly_grid: count={weekly_count} hint={weekly_hint} fallback={weekly_fallback} minH={weekly_min}"
+                )
+            except Exception as exc:
+                print(f"[DashDebug] error: {exc}")
+            self._debug_grid_once = True
+
+    def _grid_min_height(self, layout):
+        if not layout:
+            return 0
+        rows = {}
+        try:
+            count = layout.count()
+        except Exception:
+            return 0
+        for i in range(count):
+            try:
+                item = layout.itemAt(i)
+            except Exception:
+                item = None
+            if not item:
+                continue
+            try:
+                row, col, rowspan, colspan = layout.getItemPosition(i)
+            except Exception:
+                continue
+            widget = item.widget()
+            if widget is None:
+                continue
+            try:
+                hint_h = widget.sizeHint().height()
+            except Exception:
+                hint_h = 0
+            rows[row] = max(rows.get(row, 0), hint_h)
+        if not rows:
+            return 0
+        total = sum(rows.values())
+        try:
+            spacing = layout.spacing()
+        except Exception:
+            spacing = 0
+        if len(rows) > 1:
+            total += spacing * (len(rows) - 1)
+        try:
+            margins = layout.contentsMargins()
+            total += margins.top() + margins.bottom()
+        except Exception:
+            pass
+        return total
 
     def _section_header(self, title_text):
         row = QHBoxLayout()
@@ -1090,6 +1327,7 @@ class DashboardPage(QWidget):
         self.completion_date = "No forecast"
         self.priority_minutes_week = {level: 0 for level in PRIORITY_LEVELS}
         self.priority_sessions_week = {level: 0 for level in PRIORITY_LEVELS}
+        self.type_minutes = {label: 0 for label in (TASK_TYPES + [UNCATEGORIZED_LABEL])}
         self.ai_badge_text = "Recommended"
         self.ai_action_text = "Schedule Deep Work"
         self.ai_recommendation_text = "Start the day with a high-priority session."
@@ -1105,10 +1343,13 @@ class DashboardPage(QWidget):
         self.focus_delta.setText(f"{delta_prefix}{self.focus_delta_value}% vs last week")
         self.focus_delta.setProperty("trend", "up" if self.focus_delta_value >= 0 else "down")
 
-        self.energy_label.setText(self.energy_level_text)
-        self.energy_note.setText(self.energy_drop_text)
-        for bar, height in zip(self.energy_bars, self.energy_values):
-            bar.setFixedHeight(height)
+        if self.energy_label is not None:
+            self.energy_label.setText(self.energy_level_text)
+        if self.energy_note is not None:
+            self.energy_note.setText(self.energy_drop_text)
+        if self.energy_bars:
+            for bar, height in zip(self.energy_bars, self.energy_values):
+                bar.setFixedHeight(height)
 
         if hasattr(self, "pomo_minutes_label"):
             self.pomo_minutes_label.setText(self._format_minutes(self.pomo_minutes_week))
@@ -1122,6 +1363,13 @@ class DashboardPage(QWidget):
             else:
                 best_txt = "Best day: -"
             self.pomo_best_label.setText(best_txt)
+
+        if self.type_value_labels:
+            for label, val in self.type_value_labels.items():
+                minutes = int(self.type_minutes.get(label, 0))
+                val.setText(self._format_minutes(minutes))
+        if self.type_chart:
+            self.type_chart.set_data(self.type_minutes)
 
         self.completion_bar.setValue(self.completion_value)
         self.completion_label.setText(self.completion_date)
@@ -1176,11 +1424,24 @@ class DashboardPage(QWidget):
         self._load_metrics_from_db()
 
     def _on_schedule_clicked(self):
+        action = (self.ai_action_text or (self.schedule_button.text() if self.schedule_button else "") or "").strip()
         self.header_chip.setProperty("state", "saved")
         self.header_chip.setText("Saved")
-        self._set_status("Deep work scheduled")
+        if action == "Plan Recovery":
+            status = "Recovery break ready"
+        elif action == "Start a Pomodoro":
+            status = "Pomodoro opened"
+        elif action in ("Schedule Deep Work", "Block High Priority"):
+            status = "Tasks opened"
+        else:
+            status = "Action opened"
+        self._set_status(status)
         self._apply_dynamic_styles()
         QTimer.singleShot(2200, self._reset_header_chip)
+        try:
+            self.action_requested.emit(action)
+        except Exception:
+            pass
 
     def _reset_header_chip(self):
         self.header_chip.setProperty("state", "live")
@@ -1684,6 +1945,7 @@ class DashboardPage(QWidget):
         self.pomo_sessions_week = 0
         self.pomo_minutes_total = 0
         self.pomo_sessions_total = 0
+        self.type_minutes = {label: 0 for label in (TASK_TYPES + [UNCATEGORIZED_LABEL])}
         today = datetime.now().date()
         last_7_start = today - timedelta(days=6)
 
@@ -1692,8 +1954,13 @@ class DashboardPage(QWidget):
             info = conn.execute("PRAGMA table_info(pomodoro_sessions)").fetchall()
             if not info:
                 return
+            cols = {row[1] for row in info}
+            select_cols = ["started_at", "duration_min", "status"]
+            has_type = "task_type" in cols
+            if has_type:
+                select_cols.append("task_type")
             rows = conn.execute(
-                "SELECT started_at, duration_min, status FROM pomodoro_sessions"
+                f"SELECT {', '.join(select_cols)} FROM pomodoro_sessions"
             ).fetchall()
         except Exception as exc:
             print("DB Error (Pomodoro Stats):", exc)
@@ -1703,13 +1970,21 @@ class DashboardPage(QWidget):
 
         day_map = {i: 0 for i in range(7)}
         day_sessions = {i: 0 for i in range(7)}
-        for started_at, duration_min, status in rows:
+        for row in rows:
+            if len(row) >= 4:
+                started_at, duration_min, status, task_type = row[:4]
+            else:
+                started_at, duration_min, status = row[:3]
+                task_type = None
             status_norm = str(status).strip().lower() if status is not None else ""
             if status_norm and status_norm not in ("completed", "stopped"):
                 continue
             dur = int(duration_min or 0)
             self.pomo_minutes_total += dur
             self.pomo_sessions_total += 1
+            norm_type = normalize_task_type(task_type) or UNCATEGORIZED_LABEL
+            if norm_type in self.type_minutes:
+                self.type_minutes[norm_type] += dur
             dt, _ = self._parse_date(started_at)
             if dt and last_7_start <= dt.date() <= today:
                 self.pomo_minutes_week += dur
@@ -1814,7 +2089,7 @@ class DashboardPage(QWidget):
                 lbl.setStyleSheet(
                     "color: %s; font-size: 34px; font-weight: 900;" % colors["text"]
                 )
-            elif lbl is self.energy_label:
+            elif hasattr(self, "energy_label") and self.energy_label is not None and lbl is self.energy_label:
                 lbl.setStyleSheet(
                     "color: %s; font-size: 18px; font-weight: 800;" % colors["accent"]
                 )
@@ -1911,6 +2186,8 @@ class DashboardPage(QWidget):
 
         if self.consistency_chart:
             self.consistency_chart.set_theme(colors, theme)
+        if hasattr(self, "type_chart") and self.type_chart:
+            self.type_chart.set_theme(colors, theme)
         if self.heatmap_chart:
             self.heatmap_chart.set_theme(colors, theme)
         if self.velocity_chart:

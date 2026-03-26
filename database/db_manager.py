@@ -27,6 +27,7 @@ def init_db():
             priority TEXT,
             created_date TEXT,
             completed_at TEXT,
+            task_type TEXT,
             is_urgent INTEGER DEFAULT 0,
             is_important INTEGER DEFAULT 0,
             is_completed INTEGER DEFAULT 0
@@ -38,6 +39,7 @@ def init_db():
             task_id INTEGER,
             task_title TEXT,
             task_priority TEXT,
+            task_type TEXT,
             started_at TEXT,
             ended_at TEXT,
             duration_min INTEGER,
@@ -54,6 +56,14 @@ def init_db():
         pass
     try:
         cursor.execute("ALTER TABLE pomodoro_sessions ADD COLUMN task_priority TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE pomodoro_sessions ADD COLUMN task_type TEXT")
     except sqlite3.OperationalError:
         pass
     conn.commit()

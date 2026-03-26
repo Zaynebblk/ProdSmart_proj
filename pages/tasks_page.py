@@ -7,10 +7,17 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QDateEdit, QComboBox, QMessageBox,
                              QCheckBox, QGraphicsDropShadowEffect, QSizePolicy,
                              QSystemTrayIcon, QGridLayout)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl, QLocale
 from PyQt6.QtGui import QColor, QIcon, QFontMetrics
 from PyQt6.QtMultimedia import QSoundEffect
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.task_types import (
+    TASK_TYPES,
+    TASK_TYPE_COLORS,
+    UNCATEGORIZED_LABEL,
+    normalize_task_type,
+    suggest_task_type,
+)
 from resources.priority import (
     normalize_priority,
     priority_to_quadrant,
@@ -62,6 +69,47 @@ def get_dialog_style(theme):
         QComboBox QAbstractItemView {{ background-color: {input_bg}; color: {text_color}; selection-background-color: {c['accent']}; }}
     """
 
+def get_calendar_style(theme):
+    c = get_theme(theme)
+    bg = c["card_alt"] if theme == "Dark" else c["card"]
+    text = c["text"]
+    sub = c["sub"]
+    accent = c["accent"]
+    border = c["border"]
+    input_bg = c["input_bg"]
+    return f"""
+        QCalendarWidget QWidget {{ background-color: {bg}; color: {text}; }}
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{ background-color: {bg}; }}
+        QCalendarWidget QToolButton {{ color: {text}; background: transparent; font-weight: 700; }}
+        QCalendarWidget QToolButton:hover {{ color: {accent}; }}
+        QCalendarWidget QMenu {{ background: {bg}; color: {text}; }}
+        QCalendarWidget QHeaderView::section {{
+            background: {bg};
+            color: {text};
+            font-weight: 700;
+            padding: 4px 6px;
+        }}
+        QCalendarWidget QSpinBox {{
+            background: {input_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 2px 6px;
+        }}
+        QCalendarWidget QAbstractItemView {{
+            background: {bg};
+            color: {text};
+            selection-background-color: {accent};
+            selection-color: #ffffff;
+            gridline-color: {border};
+            outline: 0;
+            font-size: 11px;
+        }}
+        QCalendarWidget QAbstractItemView::item {{ color: {text}; padding: 4px; }}
+        QCalendarWidget QAbstractItemView::item:disabled {{ color: {sub}; }}
+        QCalendarWidget QAbstractItemView::item:selected {{ background: {accent}; color: #ffffff; border-radius: 6px; }}
+    """
+
 PALETTE = {
     "mist": "#BAD2E0",
     "sky": "#82AFF2",
@@ -96,6 +144,8 @@ PRIORITY_COLORS = {
     "too low": "#94a3b8"
 }
 
+REQUIRED_IMPORTANT_TYPES = {"Deep Work", "Goal-related"}
+
 # --- DIALOGS ---
 class AddTaskDialog(QDialog):
     def __init__(self, parent=None, title_text="New Task", theme="Light"):
@@ -126,16 +176,61 @@ class AddTaskDialog(QDialog):
         self.desc_input.setPlaceholderText("Add details...")
         layout.addWidget(self.desc_input)
 
+        lbl_type = QLabel("Task Type")
+        layout.addWidget(lbl_type)
+
+        self.type_combo = NoWheelComboBox()
+        self.type_combo.addItem("Auto")
+        self.type_combo.addItems(TASK_TYPES)
+        self.type_combo.setMinimumHeight(40)
+        self.type_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.type_combo.currentIndexChanged.connect(self._sync_type_requirement)
+        layout.addWidget(self.type_combo)
+
         lbl_due = QLabel("Deadline:")
         layout.addWidget(lbl_due)
 
         row = QHBoxLayout()
         self.date_input = QDateEdit()
         self.date_input.setCalendarPopup(True)
-        self.date_input.setDate(QDate.currentDate())
+        today = QDate.currentDate()
+        self.date_input.setDate(today)
+        self.date_input.setMinimumDate(today)
+        # Force English locale for clear day/month names in the calendar.
+        try:
+            self.date_input.setLocale(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
+            # Keep a clear numeric input format.
+            self.date_input.setDisplayFormat("dd/MM/yyyy")
+        except Exception:
+            pass
+        try:
+            cal = self.date_input.calendarWidget()
+            if cal:
+                try:
+                    cal.setLocale(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
+                except Exception:
+                    pass
+                try:
+                    from PyQt6.QtWidgets import QCalendarWidget
+                    cal.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.LongDayNames)
+                    cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+                except Exception:
+                    pass
+                try:
+                    cal.setMinimumDate(today)
+                except Exception:
+                    pass
+                try:
+                    cal.setMinimumSize(320, 260)
+                except Exception:
+                    pass
+                cal.setStyleSheet(get_calendar_style(theme))
+        except Exception:
+            pass
 
         self.important_check = QCheckBox("Important", self)
         self.important_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.important_check.stateChanged.connect(self._on_important_changed)
 
         row.addWidget(self.date_input)
         row.addWidget(self.important_check)
@@ -159,6 +254,8 @@ class AddTaskDialog(QDialog):
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
+        self._on_important_changed(self.important_check.isChecked())
+        self._sync_type_requirement()
 
     def _set_title_error(self, show):
         self.title_error.setVisible(bool(show))
@@ -171,22 +268,73 @@ class AddTaskDialog(QDialog):
         self._set_title_error(False)
         super().accept()
 
-    def load_data(self, title, desc, date_str, important):
+    def load_data(self, title, desc, date_str, important, task_type=None):
         self.title_input.setText(title)
         self.desc_input.setText(desc)
-        if date_str: self.date_input.setDate(QDate.fromString(date_str, "yyyy-MM-dd"))
-        self.important_check.setChecked(bool(important))
+        if date_str:
+            d = QDate.fromString(date_str, "yyyy-MM-dd")
+            try:
+                if d.isValid():
+                    min_d = self.date_input.minimumDate()
+                    if min_d.isValid() and d < min_d:
+                        d = min_d
+                    self.date_input.setDate(d)
+            except Exception:
+                self.date_input.setDate(QDate.currentDate())
+        requires_important = normalize_task_type(task_type) in REQUIRED_IMPORTANT_TYPES
+        self.important_check.setChecked(bool(important) or requires_important)
+        norm_type = normalize_task_type(task_type)
+        if norm_type and not (norm_type == "Goal-related" and not bool(important)):
+            idx = self.type_combo.findText(norm_type)
+            if idx >= 0:
+                self.type_combo.setCurrentIndex(idx)
+        else:
+            self.type_combo.setCurrentIndex(0)
+        self._sync_type_requirement()
 
     def get_data(self):
+        important = self.important_check.isChecked()
+        selected = self.type_combo.currentText()
+        if selected == "Auto":
+            task_type = suggest_task_type(self.title_input.text(), self.desc_input.text(), important=important)
+        else:
+            task_type = normalize_task_type(selected)
+        if task_type in REQUIRED_IMPORTANT_TYPES and not important:
+            important = True
+            try:
+                self.important_check.setChecked(True)
+            except Exception:
+                pass
         return {
             "title": self.title_input.text(),
             "description": self.desc_input.text(),
             "date": self.date_input.date().toString("yyyy-MM-dd"),
-            "important": self.important_check.isChecked()
+            "important": important,
+            "task_type": task_type,
         }
 
+    def _on_important_changed(self, state):
+        if not hasattr(self, "type_combo"):
+            return
+        if not bool(state) and normalize_task_type(self.type_combo.currentText()) in REQUIRED_IMPORTANT_TYPES:
+            # Required types must stay important.
+            self.important_check.setChecked(True)
+            return
+        self._sync_type_requirement()
+
+    def _sync_type_requirement(self):
+        selected = self.type_combo.currentText()
+        norm_type = normalize_task_type(selected)
+        requires = norm_type in REQUIRED_IMPORTANT_TYPES
+        if requires:
+            if not self.important_check.isChecked():
+                self.important_check.setChecked(True)
+            self.important_check.setEnabled(False)
+        else:
+            self.important_check.setEnabled(True)
+
 class ViewTaskDialog(QDialog):
-    def __init__(self, title, desc, due_date, created_date, priority, total_focus_min=0, total_sessions=0, sessions=None, parent=None, theme="Light"):
+    def __init__(self, title, desc, due_date, created_date, priority, task_type=None, total_focus_min=0, total_sessions=0, sessions=None, parent=None, theme="Light"):
         super().__init__(parent)
         self.setWindowTitle("Task Details")
         self.setFixedWidth(400)
@@ -207,6 +355,13 @@ class ViewTaskDialog(QDialog):
         lbl_p = QLabel(priority.upper())
         lbl_p.setStyleSheet(f"color: {c}; font-weight: 900; font-size: 11px;")
         layout.addWidget(lbl_p)
+
+        norm_type = normalize_task_type(task_type)
+        if norm_type:
+            type_color = TASK_TYPE_COLORS.get(norm_type, "#94a3b8")
+            lbl_t = QLabel(f"TYPE: {norm_type}")
+            lbl_t.setStyleSheet(f"color: {type_color}; font-weight: 800; font-size: 10px;")
+            layout.addWidget(lbl_t)
 
         t = QLabel(title)
         t.setWordWrap(True)
@@ -284,7 +439,7 @@ class ViewTaskDialog(QDialog):
 
 # --- TASK CARD ---
 class TaskCard(QFrame):
-    def __init__(self, t_id, title, desc, due_date_pretty, created_date_pretty, priority, focus_minutes, parent_page, is_completed=False):
+    def __init__(self, t_id, title, desc, due_date_pretty, created_date_pretty, priority, focus_minutes, parent_page, is_completed=False, task_type=None):
         super().__init__()
         self.t_id = t_id
         self.parent_page = parent_page
@@ -294,6 +449,7 @@ class TaskCard(QFrame):
         self.setObjectName("TaskCard")
 
         self.priority = normalize_priority(priority) or "too low"
+        self.task_type = normalize_task_type(task_type)
         self.title_text = title
         self.current_theme = "Light"
         self.accent_color = PRIORITY_COLORS.get(self.priority.lower(), "#94a3b8")
@@ -340,8 +496,14 @@ class TaskCard(QFrame):
         self.badge.setFixedSize(78, 22)
         self.badge.setStyleSheet("font-size: 9px; font-weight: 900;")
 
+        self.type_badge = QLabel("", content)
+        self.type_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.type_badge.setFixedHeight(20)
+        self.type_badge.setVisible(bool(self.task_type))
+
         header.addWidget(self.checkbox)
         header.addStretch()
+        header.addWidget(self.type_badge)
         header.addWidget(self.badge)
         layout.addLayout(header)
 
@@ -511,6 +673,16 @@ class TaskCard(QFrame):
             f"background: {accent}; color: white; border-radius: 11px; font-size: 9px; "
             "font-weight: 900; padding: 2px 6px;"
         )
+        if self.task_type:
+            type_color = TASK_TYPE_COLORS.get(self.task_type, "#94a3b8")
+            self.type_badge.setText(self.task_type.upper())
+            self.type_badge.setVisible(True)
+            self.type_badge.setStyleSheet(
+                f"background: {type_color}; color: white; border-radius: 10px; font-size: 8px; "
+                "font-weight: 800; padding: 2px 6px;"
+            )
+        else:
+            self.type_badge.setVisible(False)
         self.lbl_created.setStyleSheet(f"color: {created_color}; font-size: 10px; border: none; background: transparent;")
         self.lbl_due.setStyleSheet(f"color: {due_color}; font-size: 11px; font-weight: 800; border: none; background: transparent;")
         self.lbl_focus.setStyleSheet(f"color: {focus_color}; font-size: 10px; font-weight: 700; border: none; background: transparent;")
@@ -546,13 +718,13 @@ class TaskCard(QFrame):
 
     def on_edit(self): self.parent_page.edit_task(self.t_id)
     def on_delete(self): self.parent_page.delete_task(self.t_id)
-    def on_focus(self): self.parent_page.start_pomodoro(self.t_id, self.title_text, self.priority)
+    def on_focus(self): self.parent_page.start_pomodoro(self.t_id, self.title_text, self.priority, self.task_type)
 
 # --- COLUMNS ---
 class DayColumn(QWidget):
     def __init__(self, title, is_today=False, theme="Light"):
         super().__init__()
-        self.setMinimumWidth(260)
+        self.setMinimumWidth(320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.cards = []
         self.title = title
@@ -560,7 +732,7 @@ class DayColumn(QWidget):
         self.is_today = is_today
         self.current_theme = theme
         self._label_color = None
-        self._label_base_size = 16
+        self._label_base_size = 14
         self._label_min_size = 8
         self.setObjectName("DayColumn")
 
@@ -679,7 +851,7 @@ class DayColumn(QWidget):
 # --- MAIN PAGE ---
 class TasksPage(QWidget):
     task_added = pyqtSignal()
-    pomodoro_requested = pyqtSignal(int, str, str)
+    pomodoro_requested = pyqtSignal(int, str, str, object)
 
     def __init__(self):
         super().__init__()
@@ -769,8 +941,8 @@ class TasksPage(QWidget):
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         self.columns_layout = QGridLayout(container)
-        self.columns_layout.setSpacing(12)
-        self.columns_layout.setContentsMargins(0, 0, 0, 0)
+        self.columns_layout.setSpacing(18)
+        self.columns_layout.setContentsMargins(6, 0, 6, 0)
         self.columns_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll.setWidget(container)
@@ -883,12 +1055,16 @@ class TasksPage(QWidget):
         layout.setSpacing(10)
 
         title = QLabel("No tasks yet")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         subtitle = QLabel("Create a new task to kick off your day with clarity.")
         subtitle.setWordWrap(True)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         layout.addStretch()
-        layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
         layout.addStretch()
 
         self.empty_state = frame
@@ -928,13 +1104,15 @@ class TasksPage(QWidget):
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT, description TEXT, due_date TEXT, priority TEXT,
-                created_date TEXT, is_completed INTEGER DEFAULT 0,
+                created_date TEXT, task_type TEXT, is_completed INTEGER DEFAULT 0,
                 is_urgent INTEGER DEFAULT 0, is_important INTEGER DEFAULT 0
             )
         """)
         try: conn.execute("ALTER TABLE tasks ADD COLUMN created_date TEXT")
         except sqlite3.OperationalError: pass
         try: conn.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
+        except sqlite3.OperationalError: pass
+        try: conn.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT")
         except sqlite3.OperationalError: pass
         conn.close()
 
@@ -967,11 +1145,12 @@ class TasksPage(QWidget):
 
     def show_task_details(self, t_id):
         conn = self.get_db_connection()
-        row = conn.execute("SELECT title, description, due_date, created_date, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
+        row = conn.execute("SELECT title, description, due_date, created_date, task_type, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
 
         if row:
             created = row[3] if row[3] else "Unknown"
-            urg, imp = row[4], row[5]
+            task_type = row[4]
+            urg, imp = row[5], row[6]
             if urg and imp: prio = "high"
             elif not urg and imp: prio = "medium"
             elif urg and not imp: prio = "low"
@@ -1025,7 +1204,7 @@ class TasksPage(QWidget):
                 conn.close()
 
             ViewTaskDialog(
-                row[0], row[1], row[2], created, prio,
+                row[0], row[1], row[2], created, prio, task_type,
                 total_focus_min, total_sessions, sessions_widgets,
                 self, theme=self.current_theme
             ).exec()
@@ -1034,11 +1213,11 @@ class TasksPage(QWidget):
 
     def edit_task(self, t_id):
         conn = self.get_db_connection()
-        row = conn.execute("SELECT title, description, due_date, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
+        row = conn.execute("SELECT title, description, due_date, task_type, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
         conn.close()
         if row:
             dlg = AddTaskDialog(self, "Edit Task", theme=self.current_theme)
-            dlg.load_data(row[0], row[1], row[2], row[4])
+            dlg.load_data(row[0], row[1], row[2], row[5], row[3])
             if dlg.exec():
                 data = dlg.get_data()
                 self.update_task_in_db(t_id, data)
@@ -1098,11 +1277,12 @@ class TasksPage(QWidget):
         is_imp = 1 if data.get("important") else 0
         is_urg = self._deadline_is_urgent(data.get("date"))
         prio = quadrant_from_flags(is_urg, is_imp)
+        task_type = normalize_task_type(data.get("task_type"))
 
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
         conn = self.get_db_connection()
-        conn.execute("INSERT INTO tasks (title, description, due_date, created_date, priority, is_urgent, is_important, is_completed) VALUES (?,?,?,?,?,?,?,0)",
-                     (data['title'], data['description'], data['date'], today_str, prio, is_urg, is_imp))
+        conn.execute("INSERT INTO tasks (title, description, due_date, created_date, priority, task_type, is_urgent, is_important, is_completed) VALUES (?,?,?,?,?,?,?,?,0)",
+                     (data['title'], data['description'], data['date'], today_str, prio, task_type, is_urg, is_imp))
         conn.commit()
         conn.close()
 
@@ -1110,10 +1290,11 @@ class TasksPage(QWidget):
         is_imp = 1 if data.get("important") else 0
         is_urg = self._deadline_is_urgent(data.get("date"))
         prio = quadrant_from_flags(is_urg, is_imp)
+        task_type = normalize_task_type(data.get("task_type"))
 
         conn = self.get_db_connection()
-        conn.execute("UPDATE tasks SET title=?, description=?, due_date=?, priority=?, is_urgent=?, is_important=? WHERE id=?",
-                     (data['title'], data['description'], data['date'], prio, is_urg, is_imp, t_id))
+        conn.execute("UPDATE tasks SET title=?, description=?, due_date=?, priority=?, task_type=?, is_urgent=?, is_important=? WHERE id=?",
+                     (data['title'], data['description'], data['date'], prio, task_type, is_urg, is_imp, t_id))
         conn.commit()
         conn.close()
 
@@ -1141,11 +1322,11 @@ class TasksPage(QWidget):
 
             if show_completed:
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important, is_completed FROM tasks ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed FROM tasks ORDER BY due_date"
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, is_urgent, is_important, is_completed FROM tasks WHERE is_completed=0 ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed FROM tasks WHERE is_completed=0 ORDER BY due_date"
                 ).fetchall()
             focus_rows = conn.execute(
                 "SELECT task_id, COALESCE(SUM(duration_min), 0) "
@@ -1168,13 +1349,36 @@ class TasksPage(QWidget):
 
         if total_tasks == 0:
             empty = self._build_empty_state()
-            self.columns_layout.addWidget(empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop)
+            self.columns_layout.addWidget(
+                empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+            )
+            self.columns_layout.setColumnStretch(0, 1)
+            self.columns_layout.setRowStretch(0, 1)
             self.chip_total.setText("0 tasks")
             self.chip_due.setText("0 due today")
             return
 
+        type_filters = None
+        try:
+            if os.path.exists("settings.json"):
+                with open("settings.json", "r") as sf:
+                    sdata = json.load(sf)
+                    type_filters = sdata.get("task_type_filters")
+        except Exception:
+            type_filters = None
+
+        allowed_types = None
+        if isinstance(type_filters, list):
+            allowed_types = set(str(t) for t in type_filters)
+
+        displayed_tasks = 0
         for row in rows:
-            t_id, title, desc, due_date_str, created_date_str, urg, imp, is_completed = row
+            t_id, title, desc, due_date_str, created_date_str, task_type, urg, imp, is_completed = row
+            display_type = normalize_task_type(task_type)
+            if display_type is None:
+                display_type = UNCATEGORIZED_LABEL
+            if allowed_types is not None and display_type not in allowed_types:
+                continue
 
             priority = quadrant_from_flags(urg, imp)
 
@@ -1194,12 +1398,24 @@ class TasksPage(QWidget):
                 self.columns.append(col)
 
             focus_minutes = focus_map.get(t_id, 0)
-            card = TaskCard(t_id, title, desc, pretty_due, pretty_created, priority, focus_minutes, self, is_completed)
+            card = TaskCard(t_id, title, desc, pretty_due, pretty_created, priority, focus_minutes, self, is_completed, task_type)
             card.update_theme(self.current_theme)
             map_cols[pretty_due].add_task_card(card)
+            displayed_tasks += 1
+
+        if displayed_tasks == 0:
+            empty = self._build_empty_state()
+            self.columns_layout.addWidget(
+                empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+            )
+            self.columns_layout.setColumnStretch(0, 1)
+            self.columns_layout.setRowStretch(0, 1)
+            self.chip_total.setText("0 tasks")
+            self.chip_due.setText("0 due today")
+            return
 
         self._reflow_columns()
-        self.chip_total.setText(f"{total_tasks} tasks")
+        self.chip_total.setText(f"{displayed_tasks} tasks")
         self.chip_due.setText(f"{due_today} due today")
 
     def _reflow_columns(self):
@@ -1218,7 +1434,7 @@ class TasksPage(QWidget):
         margins = layout.contentsMargins()
         available = max(1, available - margins.left() - margins.right())
         spacing = layout.spacing()
-        min_col_width = 280
+        min_col_width = 340
         cols_per_row = max(1, int((available + spacing) // (min_col_width + spacing)))
 
         for idx, col in enumerate(self.columns):
@@ -1256,10 +1472,21 @@ class TasksPage(QWidget):
             return
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ProdSmart.png")
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        icon_path = self._app_icon_path()
+        icon = QIcon(icon_path) if icon_path else QIcon()
         self._tray = QSystemTrayIcon(icon, self)
         self._tray.setVisible(True)
+
+    def _app_icon_path(self):
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        png_path = os.path.join(root_dir, "ProdSmart.png")
+        ico_path = os.path.join(root_dir, "ProdSmart.ico")
+        # Prefer the PNG logo if present, so notifications use the same brand logo.
+        if os.path.exists(png_path):
+            return png_path
+        if os.path.exists(ico_path):
+            return ico_path
+        return None
 
     def _show_notification(self, title, message):
         if not getattr(self, "enable_notifications", True):
@@ -1292,6 +1519,19 @@ class TasksPage(QWidget):
             self.task_reminders_enabled = True
             self.enable_notifications = True
             self.sound_effects = True
+
+        # Clamp and apply repeat interval to the timer so reminders don't fire too often.
+        try:
+            repeat_min = int(self._reminder_repeat_minutes or 10)
+        except Exception:
+            repeat_min = 10
+        if repeat_min < 1:
+            repeat_min = 1
+        self._reminder_repeat_minutes = repeat_min
+        try:
+            self._reminder_timer.setInterval(repeat_min * 60 * 1000)
+        except Exception:
+            pass
 
         # Setup sound
         try:
@@ -1370,6 +1610,6 @@ class TasksPage(QWidget):
             except Exception:
                 continue
 
-    def start_pomodoro(self, t_id, title, priority=None):
+    def start_pomodoro(self, t_id, title, priority=None, task_type=None):
         prio = normalize_priority(priority) or "too low"
-        self.pomodoro_requested.emit(t_id, title, prio)
+        self.pomodoro_requested.emit(t_id, title, prio, normalize_task_type(task_type))

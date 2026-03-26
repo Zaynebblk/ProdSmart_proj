@@ -14,6 +14,17 @@ from resources.theme import get_theme, FONT_FAMILY
 
 _LAST_QSS_INFO = None
 
+def _app_icon_path():
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    png_path = os.path.join(root_dir, "ProdSmart.png")
+    ico_path = os.path.join(root_dir, "ProdSmart.ico")
+    # Prefer the PNG logo if present, so the window/taskbar icon matches the brand logo.
+    if os.path.exists(png_path):
+        return png_path
+    if os.path.exists(ico_path):
+        return ico_path
+    return None
+
 def _install_qss_sanitizer():
     try:
         from PyQt6.QtWidgets import QWidget
@@ -156,8 +167,9 @@ class MainApp(QMainWindow):
         self.setMinimumSize(640, 420)
 
         # --- SET WINDOW & TASKBAR ICON ---
-        if os.path.exists("ProdSmart.png"):
-            self.setWindowIcon(QIcon("ProdSmart.png"))
+        icon_path = _app_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
 
         # ID for Windows Taskbar
         try:
@@ -322,6 +334,10 @@ class MainApp(QMainWindow):
         if hasattr(self.page_history, 'request_dashboard'):
             self.page_history.request_dashboard.connect(self.open_dashboard_from_history)
 
+        # Connection 5b: Dashboard -> Action
+        if hasattr(self.page_dashboard, 'action_requested'):
+            self.page_dashboard.action_requested.connect(self.handle_dashboard_action)
+
         # Connection 3: History Restore -> Tasks Refresh
         # (This relies on the signal we added to history_page.py)
         if hasattr(self.page_history, 'task_restored'):
@@ -378,9 +394,9 @@ class MainApp(QMainWindow):
         elif index == 7:
             self._set_active_nav(self.btn_history)
 
-    def open_pomodoro_for_task(self, t_id, title, priority=None):
+    def open_pomodoro_for_task(self, t_id, title, priority=None, task_type=None):
         if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
-            self.page_pomodoro.set_task(t_id, title, priority)
+            self.page_pomodoro.set_task(t_id, title, priority, task_type)
         self.content_stack.setCurrentIndex(3)
         self._set_active_nav(self.btn_pomodoro)
 
@@ -391,6 +407,29 @@ class MainApp(QMainWindow):
     def open_dashboard_from_history(self):
         self.content_stack.setCurrentIndex(1)
         self._set_active_nav(self.btn_dashboard)
+
+    def handle_dashboard_action(self, action_text):
+        action = (action_text or "").strip().lower()
+        if action in ("start a pomodoro", "plan recovery"):
+            self.content_stack.setCurrentIndex(3)
+            self._set_active_nav(self.btn_pomodoro)
+            if action == "plan recovery":
+                if hasattr(self.page_pomodoro, "prepare_recovery_break"):
+                    try:
+                        self.page_pomodoro.prepare_recovery_break(prefer_long=True)
+                    except Exception:
+                        pass
+        elif action in ("schedule deep work", "block high priority"):
+            self.content_stack.setCurrentIndex(0)
+            self._set_active_nav(self.btn_tasks)
+            if hasattr(self.page_tasks, "refresh_tasks"):
+                try:
+                    self.page_tasks.refresh_tasks()
+                except Exception:
+                    pass
+        else:
+            self.content_stack.setCurrentIndex(0)
+            self._set_active_nav(self.btn_tasks)
 
     def open_report_from_history(self, activity_id):
         if hasattr(self, "page_report"):
@@ -741,8 +780,9 @@ if __name__ == "__main__":
         _install_qss_sanitizer()
         _install_qss_debug()
         
-        if os.path.exists("ProdSmart.png"):
-            app.setWindowIcon(QIcon("ProdSmart.png"))
+        icon_path = _app_icon_path()
+        if icon_path:
+            app.setWindowIcon(QIcon(icon_path))
             
         # Exit cleanly on Ctrl+C without a traceback.
         signal.signal(signal.SIGINT, lambda *_: app.quit())
