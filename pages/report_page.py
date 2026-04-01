@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from database.db_manager import get_db_connection
 from resources.theme import get_theme
 from resources.priority import normalize_priority, PRIORITY_LEVELS
+from resources.time_format import format_duration_minutes
 
 
 class FocusRingWidget(QFrame):
@@ -312,9 +313,9 @@ class SessionReportPage(QWidget):
         breakdown_right = QVBoxLayout()
         breakdown_right.setSpacing(10)
         self.deep_row = QLabel("Deep Focus")
-        self.deep_value = QLabel("0m")
+        self.deep_value = QLabel("0 min")
         self.minor_row = QLabel("Minor Distractions")
-        self.minor_value = QLabel("0m")
+        self.minor_value = QLabel("0 min")
         self.breakdown_note = QLabel(" ")
         self.breakdown_note.setWordWrap(True)
 
@@ -678,9 +679,12 @@ class SessionReportPage(QWidget):
             date_text = f"{start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}"
 
         if len(sessions_filtered) == 1 and dt_start and dt_end:
-            time_text = f"{self._format_time(dt_start)} - {self._format_time(dt_end)} ({total_minutes} mins)"
+            time_text = (
+                f"{self._format_time(dt_start)} - {self._format_time(dt_end)} "
+                f"({format_duration_minutes(total_minutes)})"
+            )
         elif total_minutes > 0:
-            time_text = f"Total focus: {total_minutes} mins"
+            time_text = f"Total focus: {format_duration_minutes(total_minutes)}"
         else:
             time_text = "No sessions in this range"
         self.date_label.setText(date_text)
@@ -715,7 +719,7 @@ class SessionReportPage(QWidget):
         comp_prefix = "+" if comp_delta >= 0 else ""
         sess_prefix = "+" if sess_delta >= 0 else ""
 
-        self.summary_cards[0]["value"].setText(f"{high_minutes}m")
+        self.summary_cards[0]["value"].setText(format_duration_minutes(high_minutes))
         self.summary_cards[1]["value"].setText(f"{completion_rate}%")
         self.summary_cards[2]["value"].setText(str(sessions_count))
 
@@ -727,9 +731,9 @@ class SessionReportPage(QWidget):
 
         self.ring.set_data(high_pct, "High")
         self.deep_row.setText("High Priority")
-        self.deep_value.setText(f"{high_minutes} min")
+        self.deep_value.setText(format_duration_minutes(high_minutes))
         self.minor_row.setText("Other Priority")
-        self.minor_value.setText(f"{other_minutes} min")
+        self.minor_value.setText(format_duration_minutes(other_minutes))
         if total_minutes > 0:
             self.breakdown_note.setText(f"High priority focus accounts for {high_pct}% of total time.")
         else:
@@ -778,7 +782,7 @@ class SessionReportPage(QWidget):
             row_layout.setSpacing(10)
 
             title = QLabel(task_item["title"])
-            subtitle = QLabel(f"{task_item['minutes']} mins spent")
+            subtitle = QLabel(f"{format_duration_minutes(task_item['minutes'])} spent")
             title.setStyleSheet(f"color: {self.colors['text']}; font-size: 12px; font-weight: 700;")
             subtitle.setStyleSheet(f"color: {self.colors['sub']}; font-size: 10px; font-weight: 600;")
             text_col = QVBoxLayout()

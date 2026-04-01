@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QPainter, QPainterPath, QPen, QLinearGradient, QColor
 from database.db_manager import get_db_connection
 from resources.theme import get_theme, FONT_FAMILY
+from resources.time_format import format_duration_minutes
 from resources.priority import (
     normalize_priority,
     priority_weight,
@@ -603,7 +604,7 @@ class PriorityBreakdownChart(QFrame):
             max_pill_w = 0
             for level in PRIORITY_LEVELS:
                 value = self.values.get(level, 0)
-                value_text = f"{value} min"
+                value_text = format_duration_minutes(value)
                 pill_w = metrics.horizontalAdvance(value_text) + padding_x * 2
                 if pill_w > max_pill_w:
                     max_pill_w = pill_w
@@ -628,7 +629,7 @@ class PriorityBreakdownChart(QFrame):
                 painter.setBrush(color_map.get(level, sub_color))
                 painter.drawRoundedRect(bar_rect, 6, 6)
 
-                value_text = f"{value} min"
+                value_text = format_duration_minutes(value)
                 painter.setFont(value_font)
                 text_width = metrics.horizontalAdvance(value_text)
                 pill_w = text_width + padding_x * 2
@@ -711,8 +712,10 @@ class TypeBreakdownChart(QFrame):
             value_font.setBold(True)
             painter.setFont(value_font)
             value_metrics = painter.fontMetrics()
-            max_value_text = f"{max_val} min"
-            value_text_w = value_metrics.horizontalAdvance(max_value_text)
+            value_text_w = 0
+            for value in values:
+                value_text = format_duration_minutes(value)
+                value_text_w = max(value_text_w, value_metrics.horizontalAdvance(value_text))
 
             value_gap = 10
             chart_w = rect.width() - left_pad - right_pad - value_text_w - value_gap
@@ -762,7 +765,7 @@ class TypeBreakdownChart(QFrame):
                 painter.drawRoundedRect(bar_rect, 6, 6)
 
                 # Value text
-                value_text = f"{value} min"
+                value_text = format_duration_minutes(value)
                 painter.setFont(value_font)
                 painter.setPen(value_color if value == 0 else label_color)
                 text_x = rect.right() - right_pad - value_metrics.horizontalAdvance(value_text)
@@ -971,7 +974,7 @@ class DashboardPage(QWidget):
         self.labels_main.append(title)
 
         desc = QLabel(
-            "High focus window starting at 10:30 AM. Block 90 minutes for design work."
+            "High focus window starting at 10:30 AM. Block 1h 30m for design work."
         )
         desc.setWordWrap(True)
         self.labels_sub.append(desc)
@@ -1442,14 +1445,7 @@ class DashboardPage(QWidget):
             self.header_status.setText(text)
 
     def _format_minutes(self, minutes):
-        minutes = int(minutes or 0)
-        if minutes >= 60:
-            hours = minutes // 60
-            rem = minutes % 60
-            if rem == 0:
-                return f"{hours}h"
-            return f"{hours}h {rem}m"
-        return f"{minutes} min"
+        return format_duration_minutes(minutes)
 
     def _parse_date(self, value):
         if not value:
@@ -1846,7 +1842,7 @@ class DashboardPage(QWidget):
 
         peak_note = f"Peak priority window: {peak_window_label}." if peak_window_label else ""
         best_day_note = (
-            f"Best priority day: {best_day_label} ({best_day_minutes} mins)."
+            f"Best priority day: {best_day_label} ({format_duration_minutes(best_day_minutes)})."
             if best_day_label
             else ""
         )

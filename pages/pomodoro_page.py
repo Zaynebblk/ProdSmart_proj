@@ -15,6 +15,7 @@ except Exception:
 from database.db_manager import get_db_connection
 from pages.settings_page import Toggle
 from resources.theme import get_theme, FONT_FAMILY
+from resources.time_format import format_duration_minutes
 from resources.task_types import TASK_TYPE_LIMITS, normalize_task_type
 try:
     import PyQt6.sip as sip
@@ -344,7 +345,7 @@ class PomodoroPage(QWidget):
         self.separator.setFixedHeight(2)
         self.left_vbox.addWidget(self.separator)
         
-        self.next_label = QLabel("Next Up: Short Break (5 min)")
+        self.next_label = QLabel(f"Next Up: Short Break ({format_duration_minutes(5)})")
         self.next_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.labels_sub.append(self.next_label)
         self.left_vbox.addWidget(self.next_label)
@@ -384,7 +385,12 @@ class PomodoroPage(QWidget):
         self.plan_card.layout().addWidget(self.plan_scroll)
 
         self.cycle_card = self.create_card("Current Cycle")
-        self.total_stat = self.add_stat_line(self.cycle_card, "Total Time", "130m", True)
+        self.total_stat = self.add_stat_line(
+            self.cycle_card,
+            "Total Time",
+            format_duration_minutes(130),
+            True
+        )
 
         self.settings_stack = QWidget()
         settings_layout = QVBoxLayout(self.settings_stack)
@@ -1206,7 +1212,7 @@ class PomodoroPage(QWidget):
         if not self.plan_phases:
             return
         total_minutes = sum(int(item["minutes"]) for item in self.plan_phases)
-        self.total_stat.setText(f"{total_minutes}m")
+        self.total_stat.setText(format_duration_minutes(total_minutes))
 
     def sync_settings(self):
         sender = self.sender()
@@ -1230,7 +1236,7 @@ class PomodoroPage(QWidget):
         if self.plan_phases:
             self._on_plan_changed()
         else:
-            self.total_stat.setText(f"{(f * i) + (s * (i-1)) + l}m")
+            self.total_stat.setText(format_duration_minutes((f * i) + (s * (i - 1)) + l))
             if not self.timer.isActive():
                 minutes = self._phase_minutes(self.phase)
                 self.time_left = minutes * 60
@@ -1488,14 +1494,18 @@ class PomodoroPage(QWidget):
             next_phase = self._next_plan_phase()
             if next_phase:
                 mins = int(next_phase["minutes"])
-                self.next_label.setText(f"Next Up: {self._phase_label(next_phase['phase'])} ({mins} min)")
+                self.next_label.setText(
+                    f"Next Up: {self._phase_label(next_phase['phase'])} ({format_duration_minutes(mins)})"
+                )
                 return
         if self.phase == "focus":
             next_phase = self._next_break_phase(pending_focus=True)
         else:
             next_phase = "focus"
         mins = self._phase_minutes(next_phase)
-        self.next_label.setText(f"Next Up: {self._phase_label(next_phase)} ({mins} min)")
+        self.next_label.setText(
+            f"Next Up: {self._phase_label(next_phase)} ({format_duration_minutes(mins)})"
+        )
 
     def _update_phase_badge(self):
         colors = self._theme_colors or {}
@@ -1677,7 +1687,7 @@ class PomodoroPage(QWidget):
         self.last_notification_phase = phase
         label = self._phase_label(phase)
         mins = self._phase_minutes(phase)
-        self._show_notification("Pomodoro", f"{label} started ({mins} min)")
+        self._show_notification("Pomodoro", f"{label} started ({format_duration_minutes(mins)})")
         if self._suppress_next_phase_sound:
             self._suppress_next_phase_sound = False
             return

@@ -19,6 +19,7 @@ from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from database.db_manager import get_db_connection
 from resources.priority import normalize_priority, priority_weight, PRIORITY_LEVELS
 from resources.theme import get_theme
+from resources.time_format import format_duration_minutes
 from datetime import datetime, timedelta
 import calendar
 
@@ -882,10 +883,7 @@ class HistoryPage(QWidget):
                 item.widget().deleteLater()
 
     def _format_hours(self, minutes):
-        if minutes <= 0:
-            return "0h"
-        hours = minutes / 60
-        return f"{hours:.1f}h"
+        return format_duration_minutes(minutes)
 
     def _delta_percent(self, current, previous):
         if previous <= 0:
@@ -964,9 +962,9 @@ class HistoryPage(QWidget):
         if self.current_period == "Day":
             longest = max(minutes for _, minutes, _ in sessions)
             return (
-                f"Today you logged {total_minutes} mins across {total_sessions} sessions. "
+                f"Today you logged {format_duration_minutes(total_minutes)} across {total_sessions} sessions. "
                 f"High/medium priority time: {high_medium_pct}%. "
-                f"Peak priority window was {window_text}, and your longest session was {longest} mins."
+                f"Peak priority window was {window_text}, and your longest session was {format_duration_minutes(longest)}."
             )
 
         if self.current_period == "Month":
@@ -982,7 +980,7 @@ class HistoryPage(QWidget):
             best_end = min(best_start + timedelta(days=6), end_date)
             best_range = f"{best_start.strftime('%b %d')} - {best_end.strftime('%b %d')}"
             return (
-                f"This month you focused {total_minutes} mins across {total_sessions} sessions on {active_days} days. "
+                f"This month you focused {format_duration_minutes(total_minutes)} across {total_sessions} sessions on {active_days} days. "
                 f"High/medium priority time: {high_medium_pct}%. "
                 f"Your strongest priority stretch was {best_range}, with a peak window at {window_text}."
             )
@@ -991,9 +989,9 @@ class HistoryPage(QWidget):
         best_day = max(best_by_source.items(), key=lambda item: (item[1], item[0]))
         best_day_label = best_day[0].strftime("%a")
         return (
-            f"This week you focused {total_minutes} mins across {total_sessions} sessions on {active_days} days. "
+            f"This week you focused {format_duration_minutes(total_minutes)} across {total_sessions} sessions on {active_days} days. "
             f"High/medium priority time: {high_medium_pct}%. "
-            f"Your best priority day was {best_day_label} ({minutes_by_day.get(best_day[0], 0)} mins), "
+            f"Your best priority day was {best_day_label} ({format_duration_minutes(minutes_by_day.get(best_day[0], 0))}), "
             f"with a peak window at {window_text}."
         )
 
@@ -1341,7 +1339,7 @@ class HistoryPage(QWidget):
             prev_avg = int(round(focus_minutes_prev / max(sessions_count_prev, 1))) if sessions_count_prev else 0
             avg_delta = self._delta_percent(avg_session, prev_avg)
             avg_prefix = "+" if avg_delta >= 0 else ""
-            self.stat_cards[1]["value"].setText(f"{avg_session}m")
+            self.stat_cards[1]["value"].setText(format_duration_minutes(avg_session))
             self.stat_cards[1]["delta"].setText(f"{avg_prefix}{avg_delta}%")
             self.stat_cards[1]["delta"].setStyleSheet(
                 f"color: {self.colors['good'] if avg_delta >= 0 else self.colors['bad']}; font-size: 10px; font-weight: 800;"
@@ -1554,7 +1552,7 @@ class HistoryPage(QWidget):
         info_layout.addWidget(title)
         info_layout.addWidget(subtitle)
 
-        duration_text = f"{activity['duration']} min" if activity["duration"] else ""
+        duration_text = format_duration_minutes(activity["duration"]) if activity["duration"] else ""
         duration = QLabel(duration_text)
         duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         duration.setStyleSheet(

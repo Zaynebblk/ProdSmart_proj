@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl, QLocale
 from PyQt6.QtGui import QColor, QIcon, QFontMetrics
 from PyQt6.QtMultimedia import QSoundEffect
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.time_format import format_duration_minutes
 from resources.task_types import (
     TASK_TYPES,
     TASK_TYPE_COLORS,
@@ -395,7 +396,7 @@ class ViewTaskDialog(QDialog):
         layout.addSpacing(16)
 
         # Pomodoro summary + sessions
-        summary = QLabel(f"Focus total: {total_focus_min} min  -  Sessions: {total_sessions}")
+        summary = QLabel(f"Focus total: {format_duration_minutes(total_focus_min)}  -  Sessions: {total_sessions}")
         summary.setStyleSheet(f"color: {txt}; font-size: 11px; font-weight: 700;")
         layout.addWidget(summary)
 
@@ -533,7 +534,7 @@ class TaskCard(QFrame):
         dates_layout.addWidget(self.lbl_created)
         dates_layout.addWidget(self.lbl_due)
 
-        self.lbl_focus = QLabel(f"Focus: {self.focus_minutes} min", content)
+        self.lbl_focus = QLabel(f"Focus: {format_duration_minutes(self.focus_minutes)}", content)
         self.lbl_focus.setWordWrap(True)
         self.lbl_focus.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         dates_layout.addWidget(self.lbl_focus)
@@ -1195,7 +1196,7 @@ class TasksPage(QWidget):
                     dur = int(duration_min or 0)
                     st = str(status or "").lower()
                     status_text = st if st else "completed"
-                    lbl = QLabel(f"{display_time}  -  {dur} min  ({status_text})")
+                    lbl = QLabel(f"{display_time}  -  {format_duration_minutes(dur)}  ({status_text})")
                     lbl.setStyleSheet("font-size: 11px; font-weight: 600;")
                     sessions_widgets.append(lbl)
             except Exception:

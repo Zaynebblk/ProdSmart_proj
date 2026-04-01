@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from datetime import datetime, timedelta
 from database.db_manager import get_db_connection
 from resources.theme import get_theme
+from resources.time_format import format_duration_minutes
 
 
 class EnergyTrendWidget(QFrame):
@@ -163,7 +164,7 @@ class QuickStatsPage(QWidget):
 
         # Recent sessions
         self.energy_title = QLabel("Recent Sessions")
-        self.energy_sub = QLabel("Last 10 sessions (minutes)")
+        self.energy_sub = QLabel("Last 10 sessions (duration)")
         self.content.addWidget(self.energy_title)
         self.content.addWidget(self.energy_sub)
         self.energy_chart = EnergyTrendWidget()
@@ -302,10 +303,7 @@ class QuickStatsPage(QWidget):
             return None
 
     def _format_minutes(self, minutes):
-        minutes = int(minutes or 0)
-        if minutes == 1:
-            return "1 min"
-        return f"{minutes} min"
+        return format_duration_minutes(minutes)
 
     def load_activity(self, activity_id):
         if not activity_id:
@@ -421,7 +419,7 @@ class QuickStatsPage(QWidget):
             item["delta"].setText(delta)
 
         start_time = dt_start.strftime("%I:%M %p").lstrip("0") if dt_start else "--"
-        duration_text = f"{duration} mins" if duration else "--"
+        duration_text = format_duration_minutes(duration) if duration else "--"
         if has_session:
             task_type = "Deep Work"
         else:
@@ -440,7 +438,12 @@ class QuickStatsPage(QWidget):
             max_d = max_val
             avg_d = int(round(sum(recent_durations) / len(recent_durations)))
             self.energy_sub.setText(
-                f"Last {len(recent_durations)} sessions | Min {min_d}m | Avg {avg_d}m | Max {max_d}m"
+                "Last %s sessions | Min %s | Avg %s | Max %s" % (
+                    len(recent_durations),
+                    format_duration_minutes(min_d),
+                    format_duration_minutes(avg_d),
+                    format_duration_minutes(max_d),
+                )
             )
             if len(recent_durations) > 1:
                 self.trend_start.setText("Oldest")
