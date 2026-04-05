@@ -797,7 +797,6 @@ class DashboardPage(QWidget):
         self.refresh_button = None
         self.schedule_button = None
         self.header_status = None
-        self.type_value_labels = {}
         self.type_chart = None
         self._colors = {}
         self.pomo_minutes_week = 0
@@ -1072,18 +1071,6 @@ class DashboardPage(QWidget):
         type_layout.setSpacing(8)
         self.type_chart = TypeBreakdownChart()
         type_layout.addWidget(self.type_chart)
-        self.type_value_labels = {}
-        for type_label in TASK_TYPES + [UNCATEGORIZED_LABEL]:
-            row = QHBoxLayout()
-            lbl = QLabel(type_label)
-            val = QLabel("0 min")
-            self.labels_sub.append(lbl)
-            self.labels_main.append(val)
-            row.addWidget(lbl)
-            row.addStretch()
-            row.addWidget(val)
-            type_layout.addLayout(row)
-            self.type_value_labels[type_label] = val
 
         heatmap = self._make_card("Priority Focus Heatmap")
         heatmap_layout = heatmap.layout()
@@ -1355,10 +1342,6 @@ class DashboardPage(QWidget):
                 best_txt = "Best day: -"
             self.pomo_best_label.setText(best_txt)
 
-        if self.type_value_labels:
-            for label, val in self.type_value_labels.items():
-                minutes = int(self.type_minutes.get(label, 0))
-                val.setText(self._format_minutes(minutes))
         if self.type_chart:
             self.type_chart.set_data(self.type_minutes)
 

@@ -928,6 +928,9 @@ class TasksPage(QWidget):
         header_shadow.setYOffset(6)
         self.header_frame.setGraphicsEffect(header_shadow)
 
+        # Filters
+        self._init_filters(main)
+
         # Scroll Area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -960,6 +963,7 @@ class TasksPage(QWidget):
     def showEvent(self, event):
         self.refresh_tasks()
         self._reflow_header()
+        self._reflow_filters()
         self._sync_column_title_sizes()
         super().showEvent(event)
 
@@ -967,7 +971,202 @@ class TasksPage(QWidget):
         super().resizeEvent(event)
         self._reflow_columns()
         self._reflow_header()
+        self._reflow_filters()
         self._sync_column_title_sizes()
+
+    def _init_filters(self, main_layout):
+        self.filter_frame = QFrame()
+        self.filter_frame.setObjectName("TasksFilters")
+        filter_layout = QGridLayout(self.filter_frame)
+        filter_layout.setContentsMargins(18, 12, 18, 12)
+        filter_layout.setHorizontalSpacing(12)
+        filter_layout.setVerticalSpacing(8)
+        self.filter_layout = filter_layout
+
+        self.filter_search = QLineEdit()
+        self.filter_search.setObjectName("FilterSearch")
+        self.filter_search.setPlaceholderText("Search title or description...")
+        self.filter_search.setClearButtonEnabled(True)
+        self.filter_search.setMinimumHeight(34)
+        self.filter_search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.filter_type = NoWheelComboBox()
+        self.filter_type.setObjectName("FilterCombo")
+        self.filter_type.setMinimumHeight(34)
+        self.filter_type.addItem("All Types", userData="all")
+        for t in TASK_TYPES:
+            self.filter_type.addItem(t, userData=normalize_task_type(t))
+        self.filter_type.addItem(UNCATEGORIZED_LABEL, userData="uncategorized")
+
+        self.filter_priority = NoWheelComboBox()
+        self.filter_priority.setObjectName("FilterCombo")
+        self.filter_priority.setMinimumHeight(34)
+        self.filter_priority.addItem("All Priorities", userData="all")
+        self.filter_priority.addItem("High", userData="high")
+        self.filter_priority.addItem("Medium", userData="medium")
+        self.filter_priority.addItem("Low", userData="low")
+        self.filter_priority.addItem("Too low", userData="too low")
+
+        self.filter_status = NoWheelComboBox()
+        self.filter_status.setObjectName("FilterCombo")
+        self.filter_status.setMinimumHeight(34)
+        self.filter_status.addItem("All", userData="all")
+        self.filter_status.addItem("Active", userData="active")
+        self.filter_status.addItem("Completed", userData="completed")
+
+        self.filter_due = NoWheelComboBox()
+        self.filter_due.setObjectName("FilterCombo")
+        self.filter_due.setMinimumHeight(34)
+        self.filter_due.addItem("Any due date", userData="any")
+        self.filter_due.addItem("Overdue", userData="overdue")
+        self.filter_due.addItem("Due today", userData="today")
+        self.filter_due.addItem("Next 7 days", userData="next7")
+        self.filter_due.addItem("No deadline", userData="none")
+
+        self.filter_clear_btn = QPushButton("Clear")
+        self.filter_clear_btn.setObjectName("FilterClear")
+        self.filter_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.filter_clear_btn.setStyleSheet(STYLES["btn_secondary"])
+        self.filter_clear_btn.setFixedHeight(34)
+
+        self.filter_fields = {
+            "search": self._build_filter_field("Search", self.filter_search),
+            "type": self._build_filter_field("Type", self.filter_type),
+            "priority": self._build_filter_field("Priority", self.filter_priority),
+            "status": self._build_filter_field("Status", self.filter_status),
+            "due": self._build_filter_field("Due", self.filter_due),
+            "clear": self._build_filter_button_field(self.filter_clear_btn),
+        }
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self.refresh_tasks)
+
+        self._load_filter_defaults()
+
+        self.filter_search.textChanged.connect(self._on_search_text_changed)
+        for combo in (self.filter_type, self.filter_priority, self.filter_status, self.filter_due):
+            combo.currentIndexChanged.connect(self.refresh_tasks)
+        self.filter_clear_btn.clicked.connect(self._clear_filters)
+
+        self._reflow_filters()
+        main_layout.addWidget(self.filter_frame)
+
+    def _build_filter_field(self, label_text, widget):
+        field = QWidget()
+        layout = QVBoxLayout(field)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        label = QLabel(label_text)
+        label.setObjectName("FilterLabel")
+        layout.addWidget(label)
+        layout.addWidget(widget)
+        return field
+
+    def _build_filter_button_field(self, button):
+        field = QWidget()
+        layout = QVBoxLayout(field)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        spacer = QLabel("")
+        spacer.setMinimumHeight(14)
+        layout.addWidget(spacer)
+        layout.addWidget(button)
+        return field
+
+    def _read_show_completed_setting(self):
+        show_completed = True
+        try:
+            if os.path.exists("settings.json"):
+                with open("settings.json", "r") as sf:
+                    sdata = json.load(sf)
+                    show_completed = bool(sdata.get("show_completed", True))
+        except Exception:
+            show_completed = True
+        return show_completed
+
+    def _load_filter_defaults(self):
+        show_completed = self._read_show_completed_setting()
+        self._default_status_filter = "all" if show_completed else "active"
+        idx = self.filter_status.findData(self._default_status_filter)
+        if idx >= 0:
+            self.filter_status.setCurrentIndex(idx)
+        self._default_due_filter = "any"
+
+    def _on_search_text_changed(self, _):
+        try:
+            self._search_timer.start()
+        except Exception:
+            self.refresh_tasks()
+
+    def _clear_filters(self):
+        self.filter_search.clear()
+        self.filter_type.setCurrentIndex(0)
+        self.filter_priority.setCurrentIndex(0)
+        idx = self.filter_status.findData(self._default_status_filter)
+        if idx >= 0:
+            self.filter_status.setCurrentIndex(idx)
+        self.filter_due.setCurrentIndex(0)
+        self.refresh_tasks()
+
+    def _current_filters(self):
+        return {
+            "search": (self.filter_search.text() or "").strip(),
+            "type": self.filter_type.currentData() or "all",
+            "priority": self.filter_priority.currentData() or "all",
+            "status": self.filter_status.currentData() or self._default_status_filter,
+            "due": self.filter_due.currentData() or "any",
+        }
+
+    def _filters_active(self, filters):
+        if filters.get("search"):
+            return True
+        if filters.get("type") != "all":
+            return True
+        if filters.get("priority") != "all":
+            return True
+        if filters.get("status") != getattr(self, "_default_status_filter", "all"):
+            return True
+        if filters.get("due") != getattr(self, "_default_due_filter", "any"):
+            return True
+        return False
+
+    def _reflow_filters(self):
+        if not hasattr(self, "filter_layout"):
+            return
+        layout = self.filter_layout
+        while layout.count():
+            layout.takeAt(0)
+
+        width = self.filter_frame.width() if hasattr(self, "filter_frame") else self.width()
+
+        if width < 680:
+            layout.addWidget(self.filter_fields["search"], 0, 0)
+            layout.addWidget(self.filter_fields["type"], 1, 0)
+            layout.addWidget(self.filter_fields["priority"], 2, 0)
+            layout.addWidget(self.filter_fields["status"], 3, 0)
+            layout.addWidget(self.filter_fields["due"], 4, 0)
+            layout.addWidget(self.filter_fields["clear"], 5, 0)
+            layout.setColumnStretch(0, 1)
+        elif width < 980:
+            layout.addWidget(self.filter_fields["search"], 0, 0, 1, 2)
+            layout.addWidget(self.filter_fields["clear"], 0, 2, alignment=Qt.AlignmentFlag.AlignBottom)
+            layout.addWidget(self.filter_fields["type"], 1, 0)
+            layout.addWidget(self.filter_fields["priority"], 1, 1)
+            layout.addWidget(self.filter_fields["status"], 1, 2)
+            layout.addWidget(self.filter_fields["due"], 2, 0)
+            layout.setColumnStretch(0, 1)
+            layout.setColumnStretch(1, 1)
+            layout.setColumnStretch(2, 0)
+        else:
+            layout.addWidget(self.filter_fields["search"], 0, 0)
+            layout.addWidget(self.filter_fields["type"], 0, 1)
+            layout.addWidget(self.filter_fields["priority"], 0, 2)
+            layout.addWidget(self.filter_fields["status"], 0, 3)
+            layout.addWidget(self.filter_fields["due"], 0, 4)
+            layout.addWidget(self.filter_fields["clear"], 0, 5, alignment=Qt.AlignmentFlag.AlignBottom)
+            layout.setColumnStretch(0, 1)
 
     def _sync_column_title_sizes(self):
         if not self.columns:
@@ -1037,6 +1236,34 @@ class TasksPage(QWidget):
         self.chip_due.setStyleSheet(
             "background: %s; color: %s; border: 1px solid %s; border-radius: 999px; padding: 7px 14px; font-size: 11px; font-weight: 700;" %
             (chip_bg, chip_due_color, chip_border)
+        )
+
+        if self.current_theme == "Dark":
+            filter_bg = rgba(colors["card_alt"], 0.8)
+            filter_label = colors["sub"]
+        else:
+            filter_bg = rgba(colors["card"], 0.9)
+            filter_label = colors["deep"]
+
+        self.filter_frame.setStyleSheet(
+            "QFrame#TasksFilters { background: %s; border: 1px solid %s; border-radius: 16px; }"
+            "QLabel#FilterLabel { color: %s; font-size: 10px; font-weight: 700; }"
+            "QLineEdit#FilterSearch, QComboBox#FilterCombo { background: %s; border: 1px solid %s; border-radius: 10px; padding: 6px 10px; color: %s; }"
+            "QLineEdit#FilterSearch:focus, QComboBox#FilterCombo:focus { border: 1px solid %s; }"
+            "QComboBox::drop-down { border: 0px; }"
+            "QComboBox QAbstractItemView { background: %s; color: %s; selection-background-color: %s; }"
+            % (
+                filter_bg,
+                colors["border"],
+                filter_label,
+                colors["input_bg"],
+                colors["border"],
+                colors["text"],
+                colors["accent2"],
+                colors["card"],
+                colors["text"],
+                colors["accent"],
+            )
         )
 
         for col in self.columns:
@@ -1309,25 +1536,26 @@ class TasksPage(QWidget):
         self.empty_title = None
         self.empty_subtitle = None
 
+        filters = self._current_filters()
+        filters_active = self._filters_active(filters)
+
         conn = self.get_db_connection()
         try:
-            # Respect user setting for showing completed tasks
-            show_completed = True
-            try:
-                if os.path.exists("settings.json"):
-                    with open("settings.json", "r") as sf:
-                        sdata = json.load(sf)
-                        show_completed = sdata.get("show_completed", True)
-            except:
-                pass
-
-            if show_completed:
+            status_filter = filters.get("status", "all")
+            if status_filter == "completed":
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed FROM tasks ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed "
+                    "FROM tasks WHERE is_completed=1 ORDER BY due_date"
+                ).fetchall()
+            elif status_filter == "active":
+                rows = conn.execute(
+                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed "
+                    "FROM tasks WHERE is_completed=0 ORDER BY due_date"
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed FROM tasks WHERE is_completed=0 ORDER BY due_date"
+                    "SELECT id, title, description, due_date, created_date, task_type, is_urgent, is_important, is_completed "
+                    "FROM tasks ORDER BY due_date"
                 ).fetchall()
             focus_rows = conn.execute(
                 "SELECT task_id, COALESCE(SUM(duration_min), 0) "
@@ -1346,10 +1574,17 @@ class TasksPage(QWidget):
         total_tasks = len(rows)
         due_today = 0
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
+        today_date = QDate.currentDate()
         self.subtitle.setText(QDate.currentDate().toString("dddd, d MMMM yyyy"))
 
         if total_tasks == 0:
             empty = self._build_empty_state()
+            if filters_active:
+                try:
+                    self.empty_title.setText("No tasks match your filters")
+                    self.empty_subtitle.setText("Try clearing filters or changing your search.")
+                except Exception:
+                    pass
             self.columns_layout.addWidget(
                 empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
             )
@@ -1372,6 +1607,11 @@ class TasksPage(QWidget):
         if isinstance(type_filters, list):
             allowed_types = set(str(t) for t in type_filters)
 
+        search_text = (filters.get("search") or "").lower()
+        type_filter = filters.get("type", "all")
+        priority_filter = filters.get("priority", "all")
+        due_filter = filters.get("due", "any")
+
         displayed_tasks = 0
         for row in rows:
             t_id, title, desc, due_date_str, created_date_str, task_type, urg, imp, is_completed = row
@@ -1380,8 +1620,42 @@ class TasksPage(QWidget):
                 display_type = UNCATEGORIZED_LABEL
             if allowed_types is not None and display_type not in allowed_types:
                 continue
+            if type_filter != "all":
+                if type_filter == "uncategorized":
+                    if display_type != UNCATEGORIZED_LABEL:
+                        continue
+                elif display_type != type_filter:
+                    continue
+            if search_text:
+                hay = f"{title or ''} {desc or ''}".lower()
+                if search_text not in hay:
+                    continue
 
             priority = quadrant_from_flags(urg, imp)
+            if priority_filter != "all" and priority != priority_filter:
+                continue
+
+            due_date = None
+            if due_date_str:
+                try:
+                    due_date = QDate.fromString(due_date_str, "yyyy-MM-dd")
+                except Exception:
+                    due_date = None
+            due_valid = bool(due_date and due_date.isValid())
+            if due_filter == "overdue":
+                if not due_valid or due_date >= today_date:
+                    continue
+            elif due_filter == "today":
+                if not due_valid or due_date != today_date:
+                    continue
+            elif due_filter == "next7":
+                if not due_valid:
+                    continue
+                if due_date < today_date or due_date > today_date.addDays(7):
+                    continue
+            elif due_filter == "none":
+                if due_valid:
+                    continue
 
             if not due_date_str: pretty_due = "No Deadline"
             else: pretty_due = QDate.fromString(due_date_str, "yyyy-MM-dd").toString("dddd d MMMM yyyy")
@@ -1406,6 +1680,12 @@ class TasksPage(QWidget):
 
         if displayed_tasks == 0:
             empty = self._build_empty_state()
+            if filters_active:
+                try:
+                    self.empty_title.setText("No tasks match your filters")
+                    self.empty_subtitle.setText("Try clearing filters or changing your search.")
+                except Exception:
+                    pass
             self.columns_layout.addWidget(
                 empty, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
             )
