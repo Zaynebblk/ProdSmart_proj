@@ -226,6 +226,7 @@ try:
     from pages.report_page import SessionReportPage
     from pages.settings_page import SettingsPage
     from pages.quick_stats_page import QuickStatsPage
+    from pages.login_page import LoginPage
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -346,12 +347,16 @@ class MainApp(QMainWindow):
         sidebar_l.addStretch()
         self.main_layout.addWidget(self.sidebar)
 
+        # Initially hide sidebar until user logs in
+        self.sidebar.hide()
+
         # 2. CONTENT (STACK)
         self.content_stack = QStackedWidget()
         self.content_stack.setMinimumSize(0, 0)
         self.content_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # Initialize pages
+        self.page_login = LoginPage()
         self.page_tasks = TasksPage()
         self.page_dashboard = DashboardPage()
         self.page_matrix = EisenhowerMatrix()
@@ -361,14 +366,15 @@ class MainApp(QMainWindow):
         self.page_quick_stats = QuickStatsPage()
         self.page_settings = SettingsPage()
         
-        self.content_stack.addWidget(self.page_tasks)      # Index 0
-        self.content_stack.addWidget(self.page_dashboard)  # Index 1
-        self.content_stack.addWidget(self.page_matrix)     # Index 2
-        self.content_stack.addWidget(self.page_pomodoro)   # Index 3
-        self.content_stack.addWidget(self.page_history)    # Index 4
-        self.content_stack.addWidget(self.page_settings)   # Index 5
-        self.content_stack.addWidget(self.page_report)     # Index 6
-        self.content_stack.addWidget(self.page_quick_stats) # Index 7
+        self.content_stack.addWidget(self.page_login)      # Index 0
+        self.content_stack.addWidget(self.page_tasks)      # Index 1
+        self.content_stack.addWidget(self.page_dashboard)  # Index 2
+        self.content_stack.addWidget(self.page_matrix)     # Index 3
+        self.content_stack.addWidget(self.page_pomodoro)   # Index 4
+        self.content_stack.addWidget(self.page_history)    # Index 5
+        self.content_stack.addWidget(self.page_settings)   # Index 6
+        self.content_stack.addWidget(self.page_report)     # Index 7
+        self.content_stack.addWidget(self.page_quick_stats) # Index 8
 
         self.main_layout.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(self.central_widget)
@@ -380,18 +386,21 @@ class MainApp(QMainWindow):
             app.installEventFilter(self._transient_blocker)
 
         # 3. BUTTON CONNECTIONS
-        self.btn_tasks.clicked.connect(lambda: self.content_stack.setCurrentIndex(0))
-        self.btn_dashboard.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
+        self.btn_tasks.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
+        self.btn_dashboard.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
         
-        self.btn_matrix.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
-        self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
-        self.btn_history.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
-        self.btn_settings.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
+        self.btn_matrix.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
+        self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
+        self.btn_history.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
+        self.btn_settings.clicked.connect(lambda: self.content_stack.setCurrentIndex(6))
 
         # Monitor Page Changes to Auto-Refresh Data
         self.content_stack.currentChanged.connect(self.on_page_changed)
 
         # --- 4. SIGNALS CONNECTIONS ---
+        
+        # Connection 0: Login -> Main App
+        self.page_login.login_successful.connect(self.on_login_successful)
         
         # Connection 1: Settings -> Apply Theme
         self.page_settings.settings_saved.connect(self.apply_settings)
@@ -439,37 +448,46 @@ class MainApp(QMainWindow):
 
         # 5. INITIAL LOAD
         self.apply_settings()
-        self.content_stack.setCurrentIndex(0)
-        self.page_tasks.refresh_tasks()
+        self.content_stack.setCurrentIndex(0)  # Start with login page
+        # Don't refresh tasks initially since user isn't logged in yet
+
+    def on_login_successful(self, user_id):
+        """Handle successful login - switch to main app"""
+        # Store user_id for the session
+        self.current_user_id = user_id
+        # Show sidebar
+        self.sidebar.show()
+        # Switch to tasks page (index 1)
+        self.content_stack.setCurrentIndex(1)
         self._set_active_nav(self.btn_tasks)
 
     def on_page_changed(self, index):
         """Auto-refresh data when clicking on a tab"""
-        if index == 0:
+        if index == 1:  # Tasks page
             if hasattr(self, "_transient_blocker"):
                 self._transient_blocker.suppress_for(1200)
             self.page_tasks.refresh_tasks()
             self._set_active_nav(self.btn_tasks)
-        elif index == 1:
+        elif index == 2:  # Dashboard
             if hasattr(self.page_dashboard, "refresh_dashboard"):
                 self.page_dashboard.refresh_dashboard()
             elif hasattr(self.page_dashboard, "_load_metrics_from_db"):
                 self.page_dashboard._load_metrics_from_db()
             self._set_active_nav(self.btn_dashboard)
-        elif index == 2:
+        elif index == 3:  # Matrix
             self.page_matrix.refresh_matrix()
             self._set_active_nav(self.btn_matrix)
-        elif index == 3:
+        elif index == 4:  # Pomodoro
             self._set_active_nav(self.btn_pomodoro)
-        elif index == 4:
+        elif index == 5:  # History
             # --- FIX: Removed 'theme_mode' argument here ---
             self.page_history.refresh_history()
             self._set_active_nav(self.btn_history)
-        elif index == 5:
+        elif index == 6:  # Settings
             self._set_active_nav(self.btn_settings)
-        elif index == 6:
+        elif index == 7:  # Report
             self._set_active_nav(self.btn_history)
-        elif index == 7:
+        elif index == 8:  # Quick Stats
             self._set_active_nav(self.btn_history)
 
     def open_pomodoro_for_task(self, t_id, title, priority=None, task_type=None):
@@ -592,6 +610,13 @@ class MainApp(QMainWindow):
             try:
                 if hasattr(self.page_settings, 'update_theme'):
                     self.page_settings.update_theme(theme)
+            except Exception:
+                pass
+        # Apply theme to login page
+        if hasattr(self, 'page_login'):
+            try:
+                if hasattr(self.page_login, 'update_theme'):
+                    self.page_login.update_theme(theme)
             except Exception:
                 pass
         # Pomodoro page has its own `apply_theme` which reloads settings like auto-start
@@ -746,6 +771,71 @@ class MainApp(QMainWindow):
                 border-radius: 6px;
             }}
             QMessageBox QPushButton:hover {{ background-color: {c['border']}; }}
+
+            /* LOGIN PAGE */
+            QLabel#AppIcon {{ color: {c['accent']}; }}
+            QLabel#LoginTitle {{ color: {c['text']}; font-weight: bold; }}
+            QLabel#LoginSubtitle {{ color: {c['sub']}; }}
+            QFrame#LoginCard {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+            QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
+            QLabel#FieldIcon {{ color: {c['sub']}; }}
+            QLineEdit#LoginInput {{
+                background-color: {c['input_bg']};
+                border: 2px solid {c['border']};
+                border-radius: 10px;
+                padding: 12px 16px;
+                color: {c['text']};
+                font-size: 14px;
+            }}
+            QLineEdit#LoginInput:focus {{
+                border-color: {c['accent']};
+                background-color: {c['card']};
+            }}
+            QCheckBox#LoginCheckbox {{
+                color: {c['sub']};
+                spacing: 8px;
+            }}
+            QCheckBox#LoginCheckbox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid {c['border']};
+                border-radius: 4px;
+                background-color: {c['input_bg']};
+            }}
+            QCheckBox#LoginCheckbox::indicator:checked {{
+                background-color: {c['accent']};
+                border-color: {c['accent']};
+            }}
+            QPushButton#AnimatedButton {{
+                border: none;
+                border-radius: 12px;
+                padding: 14px 24px;
+                font-size: 16px;
+                font-weight: bold;
+                min-height: 20px;
+            }}
+            QPushButton#AnimatedButton[primary="true"] {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {c['accent']}, stop:1 {c['accent2']});
+                color: white;
+            }}
+            QPushButton#AnimatedButton[primary="false"] {{
+                background-color: {c['card_alt']};
+                color: {c['text']};
+                border: 2px solid {c['border']};
+            }}
+            QPushButton#AnimatedButton[primary="true"]:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {c['accent2']}, stop:1 {c['deep']});
+            }}
+            QPushButton#AnimatedButton[primary="false"]:hover {{
+                background-color: {c['accent_soft']};
+                border-color: {c['accent']};
+            }}
         """)
 
     # --- STYLE DARK ---
@@ -791,6 +881,71 @@ class MainApp(QMainWindow):
                 border-radius: 6px;
             }}
             QMessageBox QPushButton:hover {{ background-color: {c['border']}; }}
+
+            /* LOGIN PAGE */
+            QLabel#AppIcon {{ color: {c['accent']}; }}
+            QLabel#LoginTitle {{ color: {c['text']}; font-weight: bold; }}
+            QLabel#LoginSubtitle {{ color: {c['sub']}; }}
+            QFrame#LoginCard {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+            QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
+            QLabel#FieldIcon {{ color: {c['sub']}; }}
+            QLineEdit#LoginInput {{
+                background-color: {c['input_bg']};
+                border: 2px solid {c['border']};
+                border-radius: 10px;
+                padding: 12px 16px;
+                color: {c['text']};
+                font-size: 14px;
+            }}
+            QLineEdit#LoginInput:focus {{
+                border-color: {c['accent']};
+                background-color: {c['card']};
+            }}
+            QCheckBox#LoginCheckbox {{
+                color: {c['sub']};
+                spacing: 8px;
+            }}
+            QCheckBox#LoginCheckbox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid {c['border']};
+                border-radius: 4px;
+                background-color: {c['input_bg']};
+            }}
+            QCheckBox#LoginCheckbox::indicator:checked {{
+                background-color: {c['accent']};
+                border-color: {c['accent']};
+            }}
+            QPushButton#AnimatedButton {{
+                border: none;
+                border-radius: 12px;
+                padding: 14px 24px;
+                font-size: 16px;
+                font-weight: bold;
+                min-height: 20px;
+            }}
+            QPushButton#AnimatedButton[primary="true"] {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {c['accent']}, stop:1 {c['accent2']});
+                color: white;
+            }}
+            QPushButton#AnimatedButton[primary="false"] {{
+                background-color: {c['card_alt']};
+                color: {c['text']};
+                border: 2px solid {c['border']};
+            }}
+            QPushButton#AnimatedButton[primary="true"]:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {c['accent2']}, stop:1 {c['deep']});
+            }}
+            QPushButton#AnimatedButton[primary="false"]:hover {{
+                background-color: {c['accent_soft']};
+                border-color: {c['accent']};
+            }}
         """)
 
 

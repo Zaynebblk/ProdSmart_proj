@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import hashlib
 
 # Get the absolute path to the project root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,16 +35,13 @@ def init_db():
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+        CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER,
-            task_title TEXT,
-            task_priority TEXT,
-            task_type TEXT,
-            started_at TEXT,
-            ended_at TEXT,
-            duration_min INTEGER,
-            status TEXT
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     try:
@@ -66,5 +64,51 @@ def init_db():
         cursor.execute("ALTER TABLE pomodoro_sessions ADD COLUMN task_type TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN latitude REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN longitude REAL")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
+
+def hash_password(password):
+    """Hash a password using SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_user(username, password, latitude=None, longitude=None):
+    """Create a new user account."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, password_hash, latitude, longitude) VALUES (?, ?, ?, ?)",
+            (username, hash_password(password), latitude, longitude)
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False  # Username already exists
+    finally:
+        conn.close()
+
+def authenticate_user(username, password):
+    """Authenticate a user. Returns user_id if successful, None otherwise."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM users WHERE username = ? AND password_hash = ?",
+        (username, hash_password(password))
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def get_current_user():
+    """Get the currently logged in user ID from settings."""
+    # This would be implemented to store session state
+    # For now, return None (no user logged in)
+    return None
