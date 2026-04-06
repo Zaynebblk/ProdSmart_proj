@@ -1,11 +1,15 @@
 import json
 import os
+import sys
+import subprocess
+from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, 
                              QPushButton, QMessageBox, QFrame, QHBoxLayout, 
-                             QScrollArea, QCheckBox)
+                             QScrollArea, QCheckBox, QLineEdit)
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty
 from PyQt6.QtGui import QPainter, QColor
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.api_client import api_ping, ApiError, set_base_url
 from resources.task_types import TASK_TYPES, UNCATEGORIZED_LABEL
 
 # --- CUSTOM TOGGLE SWITCH CLASS ---
@@ -256,6 +260,39 @@ class SettingsPage(QWidget):
         self.content_layout.addWidget(self.card_general)
 
 
+        # --- SECTION 4: COLLABORATION ---
+        self.content_layout.addWidget(self.create_section_header("Collaboration"))
+
+        self.card_collab = QFrame()
+        self.card_collab.setObjectName("SettingsCard")
+        collab_layout = QVBoxLayout(self.card_collab)
+        collab_layout.setContentsMargins(20, 20, 20, 20)
+        collab_layout.setSpacing(12)
+
+        lbl_server = QLabel("Server URL")
+        lbl_server.setObjectName("SettingsLabel")
+        lbl_server.setStyleSheet("font-size: 14px; font-weight: bold;")
+        collab_layout.addWidget(lbl_server)
+
+        self.input_cloud_url = QLineEdit()
+        self.input_cloud_url.setPlaceholderText("http://127.0.0.1:8000")
+        self.input_cloud_url.setMinimumHeight(40)
+        self.input_cloud_url.setText("http://127.0.0.1:8000")
+        collab_layout.addWidget(self.input_cloud_url)
+
+        self.btn_start_server = QPushButton("Start Server")
+        self.btn_start_server.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start_server.clicked.connect(self.start_cloud_server)
+        collab_layout.addWidget(self.btn_start_server)
+
+        self.server_status = QLabel("Server status: unknown")
+        self.server_status.setObjectName("SettingsLabel")
+        self.server_status.setStyleSheet("font-size: 12px; color: #64748b;")
+        collab_layout.addWidget(self.server_status)
+
+        self.content_layout.addWidget(self.card_collab)
+
+
         # --- SAVE BUTTON ---
         self.content_layout.addSpacing(10)
         btn_save = QPushButton("Save Changes")
@@ -352,6 +389,12 @@ class SettingsPage(QWidget):
                     else:
                         for cb in self.type_checks.values():
                             cb.setChecked(True)
+
+                    if hasattr(self, "input_cloud_url"):
+                        cloud_url = str(data.get("cloud_base_url", "")).strip()
+                        if not cloud_url:
+                            cloud_url = "http://127.0.0.1:8000"
+                        self.input_cloud_url.setText(cloud_url)
         except Exception as e:
             print(f"Error loading settings: {e}")
 
@@ -367,9 +410,20 @@ class SettingsPage(QWidget):
             "sound_effects": self.toggle_sound.isChecked(),
             "task_type_filters": [label for label, cb in self.type_checks.items() if cb.isChecked()],
         }
+        if hasattr(self, "input_cloud_url"):
+            data["cloud_base_url"] = self.input_cloud_url.text().strip()
         
         json_path = self.get_settings_path()
         try:
+            existing = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, "r") as f:
+                        existing = json.load(f)
+                except Exception:
+                    existing = {}
+            existing.update(data)
+            data = existing
             with open(json_path, "w") as f:
                 json.dump(data, f, indent=4)
             
@@ -434,8 +488,23 @@ class SettingsPage(QWidget):
             except Exception:
                 pass
 
+        if hasattr(self, "input_cloud_url"):
+            self.input_cloud_url.setStyleSheet(
+                f"QLineEdit {{ border: 1px solid {c['border']}; border-radius: 8px; padding: 6px 10px; "
+                f"background-color: {c['input_bg']}; color: {c['text']}; font-size: 10.5pt; }}"
+                f"QLineEdit:focus {{ border: 1px solid {c['accent']}; }}"
+            )
+        if hasattr(self, "btn_start_server"):
+            self.btn_start_server.setStyleSheet(
+                f"QPushButton {{ background-color: {c['accent']}; color: white; border-radius: 8px; "
+                f"padding: 10px 14px; font-weight: 700; }}"
+                f"QPushButton:hover {{ background-color: {c['deep']}; }}"
+            )
+
         card_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {rgba(c['card'], 0.96)}, stop:1 {rgba(accent_soft, 0.35)})"
-        for card in (self.card_theme, self.card_tasks, self.card_general):
+        for card in (self.card_theme, self.card_tasks, self.card_general, getattr(self, "card_collab", None)):
+            if not card:
+                continue
             card.setStyleSheet(
                 f"QFrame#SettingsCard {{ background: {card_bg}; border: 1px solid {c['border']}; "
                 f"border-left: 4px solid {c['accent']}; border-radius: 14px; }}"
@@ -466,3 +535,70 @@ class SettingsPage(QWidget):
                 t.update()
             except Exception:
                 pass
+
+        if hasattr(self, "server_status"):
+            self.server_status.setStyleSheet(f"font-size: 12px; color: {c['sub']};")
+
+    def _is_local_url(self, url):
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            return host in ("127.0.0.1", "localhost")
+        except Exception:
+            return False
+
+    def start_cloud_server(self):
+        url = ""
+        if hasattr(self, "input_cloud_url"):
+            url = self.input_cloud_url.text().strip()
+        if not url:
+            url = "http://127.0.0.1:8000"
+
+        if not self._is_local_url(url):
+            QMessageBox.information(
+                self,
+                "Server URL",
+                "The Server URL points to another machine. Start the server on that machine, or change the URL to 127.0.0.1."
+            )
+            return
+
+        try:
+            set_base_url(url)
+        except Exception:
+            pass
+
+        # If already running, no need to start a new one
+        try:
+            api_ping()
+            if hasattr(self, "server_status"):
+                self.server_status.setText("Server status: running")
+            QMessageBox.information(self, "Server", "Server is already running.")
+            return
+        except ApiError:
+            pass
+
+        server_path = os.path.join(os.getcwd(), "server", "main.py")
+        if not os.path.exists(server_path):
+            QMessageBox.warning(self, "Server", "Server entrypoint not found (server/main.py).")
+            return
+
+        creationflags = 0
+        if os.name == "nt":
+            try:
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            except Exception:
+                creationflags = 0
+
+        try:
+            subprocess.Popen(
+                [sys.executable, server_path],
+                cwd=os.getcwd(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            if hasattr(self, "server_status"):
+                self.server_status.setText("Server status: starting...")
+            QMessageBox.information(self, "Server", "Server started. Please try login again in a few seconds.")
+        except Exception as e:
+            QMessageBox.warning(self, "Server", f"Could not start server: {e}")

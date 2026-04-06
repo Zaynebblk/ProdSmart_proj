@@ -15,5 +15,9 @@
         "Goal-related",
         "Learning",
         "Uncategorized"
-    ]
+    ],
+    "cloud_base_url": "http://127.0.0.1:8000",
+    "cloud_token": "i90dqVQHi0ye3Mbfqk0miYiRllEw5sFfckN-E4PnFK0",
+    "cloud_user_id": 1,
+    "cloud_username": "test"
 }

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QPushButton, QStackedWidget, QFrame, QLabel, QSizePolicy)
 from PyQt6.QtCore import Qt, QObject, QEvent, qInstallMessageHandler
 from PyQt6.QtGui import QIcon, QPixmap, QFontMetrics
-from resources.theme import get_theme, FONT_FAMILY
+from resources.theme import get_theme, FONT_FAMILY, rgba
 
 _LAST_QSS_INFO = None
 
@@ -227,6 +227,7 @@ try:
     from pages.settings_page import SettingsPage
     from pages.quick_stats_page import QuickStatsPage
     from pages.login_page import LoginPage
+    from pages.team_page import TeamPage
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -313,11 +314,12 @@ class MainApp(QMainWindow):
         sep_top.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar_l.addWidget(sep_top)
         # -----------------------------------------
-        self.btn_tasks = QPushButton("Tasks")
+        self.btn_tasks = QPushButton("My Tasks")
         self.btn_dashboard = QPushButton("Dashboard")
         
         self.btn_matrix = QPushButton("Matrix")
         self.btn_pomodoro = QPushButton("Pomodoro")
+        self.btn_teams = QPushButton("Teams")
         self.btn_history = QPushButton("History")
         self.btn_settings = QPushButton("Settings")
 
@@ -325,6 +327,7 @@ class MainApp(QMainWindow):
             self.btn_dashboard,
             self.btn_matrix,
             self.btn_pomodoro,
+            self.btn_teams,
             self.btn_history,
             self.btn_settings
         ]
@@ -333,7 +336,7 @@ class MainApp(QMainWindow):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("nav", True)
 
-        for btn in [ self.btn_tasks,self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_history]:
+        for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history]:
             sidebar_l.addWidget(btn)
 
         sep_bottom = QFrame()
@@ -365,6 +368,7 @@ class MainApp(QMainWindow):
         self.page_report = SessionReportPage()
         self.page_quick_stats = QuickStatsPage()
         self.page_settings = SettingsPage()
+        self.page_team = TeamPage()
         
         self.content_stack.addWidget(self.page_login)      # Index 0
         self.content_stack.addWidget(self.page_tasks)      # Index 1
@@ -375,6 +379,7 @@ class MainApp(QMainWindow):
         self.content_stack.addWidget(self.page_settings)   # Index 6
         self.content_stack.addWidget(self.page_report)     # Index 7
         self.content_stack.addWidget(self.page_quick_stats) # Index 8
+        self.content_stack.addWidget(self.page_team)       # Index 9
 
         self.main_layout.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(self.central_widget)
@@ -391,6 +396,7 @@ class MainApp(QMainWindow):
         
         self.btn_matrix.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
         self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
+        self.btn_teams.clicked.connect(lambda: self.content_stack.setCurrentIndex(9))
         self.btn_history.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
         self.btn_settings.clicked.connect(lambda: self.content_stack.setCurrentIndex(6))
 
@@ -446,6 +452,10 @@ class MainApp(QMainWindow):
         if hasattr(self.page_quick_stats, 'request_history'):
             self.page_quick_stats.request_history.connect(self.open_history_from_quick_stats)
 
+        # Connection 10: Team Tasks -> Team Pomodoro
+        if hasattr(self.page_team, 'team_pomodoro_requested'):
+            self.page_team.team_pomodoro_requested.connect(self.open_pomodoro_for_team)
+
         # 5. INITIAL LOAD
         self.apply_settings()
         self.content_stack.setCurrentIndex(0)  # Start with login page
@@ -489,6 +499,10 @@ class MainApp(QMainWindow):
             self._set_active_nav(self.btn_history)
         elif index == 8:  # Quick Stats
             self._set_active_nav(self.btn_history)
+        elif index == 9:  # Teams
+            if hasattr(self.page_team, "refresh_teams"):
+                self.page_team.refresh_teams()
+            self._set_active_nav(self.btn_teams)
 
     def open_pomodoro_for_task(self, t_id, title, priority=None, task_type=None):
         if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
@@ -546,6 +560,15 @@ class MainApp(QMainWindow):
     def open_history_from_quick_stats(self):
         self.content_stack.setCurrentIndex(4)
         self._set_active_nav(self.btn_history)
+
+    def open_pomodoro_for_team(self, team_id, start_now=False):
+        self.content_stack.setCurrentIndex(4)
+        self._set_active_nav(self.btn_pomodoro)
+        if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "activate_team_mode"):
+            try:
+                self.page_pomodoro.activate_team_mode(team_id, start_now)
+            except Exception:
+                pass
 
     def _set_active_nav(self, active_btn):
         if not hasattr(self, "nav_buttons"):
@@ -606,6 +629,12 @@ class MainApp(QMainWindow):
 
         if hasattr(self, 'page_quick_stats'):
             self.page_quick_stats.update_theme(theme)
+        if hasattr(self, 'page_team'):
+            try:
+                if hasattr(self.page_team, 'update_theme'):
+                    self.page_team.update_theme(theme)
+            except Exception:
+                pass
         if hasattr(self, 'page_settings'):
             try:
                 if hasattr(self.page_settings, 'update_theme'):
@@ -783,13 +812,26 @@ class MainApp(QMainWindow):
             }}
             QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
             QLabel#FieldIcon {{ color: {c['sub']}; }}
+            QLabel#SectionTitle {{
+                color: {c['accent']};
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 1px;
+                text-transform: uppercase;
+                padding: 0 10px;
+            }}
+            QFrame#SectionLine {{
+                background-color: {rgba(c['border'], 0.6)};
+                min-height: 1px;
+                max-height: 1px;
+            }}
             QLineEdit#LoginInput {{
                 background-color: {c['input_bg']};
                 border: 2px solid {c['border']};
-                border-radius: 10px;
-                padding: 12px 16px;
+                border-radius: 12px;
+                padding: 6px 14px;
                 color: {c['text']};
-                font-size: 14px;
+                font-size: 15px;
             }}
             QLineEdit#LoginInput:focus {{
                 border-color: {c['accent']};
@@ -812,11 +854,11 @@ class MainApp(QMainWindow):
             }}
             QPushButton#AnimatedButton {{
                 border: none;
-                border-radius: 12px;
-                padding: 14px 24px;
+                border-radius: 14px;
+                padding: 16px 24px;
                 font-size: 16px;
-                font-weight: bold;
-                min-height: 20px;
+                font-weight: 800;
+                min-height: 44px;
             }}
             QPushButton#AnimatedButton[primary="true"] {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -824,7 +866,7 @@ class MainApp(QMainWindow):
                 color: white;
             }}
             QPushButton#AnimatedButton[primary="false"] {{
-                background-color: {c['card_alt']};
+                background-color: transparent;
                 color: {c['text']};
                 border: 2px solid {c['border']};
             }}
@@ -835,6 +877,7 @@ class MainApp(QMainWindow):
             QPushButton#AnimatedButton[primary="false"]:hover {{
                 background-color: {c['accent_soft']};
                 border-color: {c['accent']};
+                color: {c['deep']};
             }}
         """)
 
@@ -893,13 +936,26 @@ class MainApp(QMainWindow):
             }}
             QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
             QLabel#FieldIcon {{ color: {c['sub']}; }}
+            QLabel#SectionTitle {{
+                color: {c['accent']};
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 1px;
+                text-transform: uppercase;
+                padding: 0 10px;
+            }}
+            QFrame#SectionLine {{
+                background-color: {rgba(c['border'], 0.6)};
+                min-height: 1px;
+                max-height: 1px;
+            }}
             QLineEdit#LoginInput {{
                 background-color: {c['input_bg']};
                 border: 2px solid {c['border']};
-                border-radius: 10px;
-                padding: 12px 16px;
+                border-radius: 12px;
+                padding: 6px 14px;
                 color: {c['text']};
-                font-size: 14px;
+                font-size: 15px;
             }}
             QLineEdit#LoginInput:focus {{
                 border-color: {c['accent']};
@@ -922,11 +978,11 @@ class MainApp(QMainWindow):
             }}
             QPushButton#AnimatedButton {{
                 border: none;
-                border-radius: 12px;
-                padding: 14px 24px;
+                border-radius: 14px;
+                padding: 16px 24px;
                 font-size: 16px;
-                font-weight: bold;
-                min-height: 20px;
+                font-weight: 800;
+                min-height: 44px;
             }}
             QPushButton#AnimatedButton[primary="true"] {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -934,7 +990,7 @@ class MainApp(QMainWindow):
                 color: white;
             }}
             QPushButton#AnimatedButton[primary="false"] {{
-                background-color: {c['card_alt']};
+                background-color: transparent;
                 color: {c['text']};
                 border: 2px solid {c['border']};
             }}
@@ -945,6 +1001,7 @@ class MainApp(QMainWindow):
             QPushButton#AnimatedButton[primary="false"]:hover {{
                 background-color: {c['accent_soft']};
                 border-color: {c['accent']};
+                color: {c['deep']};
             }}
         """)
 

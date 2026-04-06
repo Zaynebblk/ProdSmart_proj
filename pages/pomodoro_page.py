@@ -5,6 +5,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QFrame, QSpinBox, QApplication, QSystemTrayIcon,
                              QToolButton, QProgressBar, QScrollArea, QMessageBox, QSizePolicy, QGridLayout, QStyle)
+from PyQt6.QtWidgets import QComboBox
 from PyQt6.QtCore import Qt, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPainterPath, QPen, QColor, QPixmap, QDesktopServices
 from PyQt6.QtCore import QUrl
@@ -17,6 +18,13 @@ from pages.settings_page import Toggle
 from resources.theme import get_theme, FONT_FAMILY
 from resources.time_format import format_duration_minutes
 from resources.task_types import TASK_TYPE_LIMITS, normalize_task_type
+from resources.api_client import (
+    ApiError,
+    api_list_teams,
+    api_get_team_pomodoro,
+    api_start_team_pomodoro,
+    api_stop_team_pomodoro,
+)
 try:
     import PyQt6.sip as sip
 except Exception:
@@ -90,16 +98,174 @@ class PomodoroPage(QWidget):
         self.plan_rows = []
         self.plan_label_chips = []
         self._last_interval_value = None
+
+        # Team session state
+        self.team_timer_poll = QTimer()
+        self.team_timer_poll.timeout.connect(self.refresh_team_session)
+        self.team_timer_tick = QTimer()
+        self.team_timer_tick.timeout.connect(self._tick_team_countdown)
+        self.team_remaining_seconds = None
+        self.team_status = "idle"
+        self.team_phase = None
+        self.team_selected_id = None
+        self.team_mode_enabled = False
         
         self.setup_ui()
         self._rebuild_plan_inputs()
         self._set_phase("focus", reset_time=True, notify=False)
         self._recover_incomplete_sessions()
 
+    def _build_team_mode_card(self):
+        self.team_mode_card = QFrame()
+        self.team_mode_card.setObjectName("TeamModeCard")
+        self.team_mode_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        layout = QVBoxLayout(self.team_mode_card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+
+        mode_row = QHBoxLayout()
+        self.team_mode_label = QLabel("Mode: Solo")
+        self.team_mode_label.setObjectName("TeamModeLabel")
+        self.team_mode_toggle = Toggle(width=44)
+        self.team_mode_toggle.setObjectName("TeamModeToggle")
+        self.team_mode_toggle.stateChanged.connect(self.on_team_mode_toggled)
+        mode_row.addWidget(self.team_mode_label)
+        mode_row.addStretch()
+        mode_row.addWidget(self.team_mode_toggle)
+        layout.addLayout(mode_row)
+
+        picker_row = QHBoxLayout()
+        self.team_combo = QComboBox()
+        self.team_combo.setObjectName("TeamSessionCombo")
+        self.team_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.team_combo.currentIndexChanged.connect(self._on_team_changed)
+        picker_row.addWidget(self.team_combo, stretch=1)
+
+        self.btn_team_refresh = QPushButton("Refresh")
+        self.btn_team_refresh.setObjectName("TeamSessionRefresh")
+        self.btn_team_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_team_refresh.clicked.connect(self.refresh_team_list)
+        picker_row.addWidget(self.btn_team_refresh)
+
+        self.team_picker_widget = QWidget()
+        picker_layout = QVBoxLayout(self.team_picker_widget)
+        picker_layout.setContentsMargins(0, 0, 0, 0)
+        picker_layout.addLayout(picker_row)
+        layout.addWidget(self.team_picker_widget)
+
+    def _build_team_session_card(self):
+        self.team_session_card = QFrame()
+        self.team_session_card.setObjectName("TeamSessionCard")
+        self.team_session_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        layout = QVBoxLayout(self.team_session_card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        self.team_title = QLabel("TEAM SESSION")
+        self.team_title.setObjectName("TeamSessionTitle")
+        header_row.addWidget(self.team_title)
+        header_row.addStretch()
+        layout.addLayout(header_row)
+
+        status_row = QHBoxLayout()
+        self.team_status_label = QLabel("Status: Idle")
+        self.team_status_label.setObjectName("TeamSessionStatus")
+        self.team_phase_label = QLabel("Phase: -")
+        self.team_phase_label.setObjectName("TeamSessionPhase")
+        status_row.addWidget(self.team_status_label)
+        status_row.addStretch()
+        status_row.addWidget(self.team_phase_label)
+        layout.addLayout(status_row)
+
+        self.team_timer_label = QLabel("--:--")
+        self.team_timer_label.setObjectName("TeamSessionTimer")
+        self.team_timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.team_timer_label)
+
+        btn_row = QHBoxLayout()
+        self.btn_team_focus = QPushButton("Start Focus")
+        self.btn_team_break = QPushButton("Start Break")
+        self.btn_team_stop = QPushButton("Stop")
+        for b in (self.btn_team_focus, self.btn_team_break, self.btn_team_stop):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFixedHeight(34)
+            btn_row.addWidget(b)
+        self.btn_team_focus.clicked.connect(self.start_team_focus)
+        self.btn_team_break.clicked.connect(self.start_team_break)
+        self.btn_team_stop.clicked.connect(self.stop_team_session)
+        layout.addLayout(btn_row)
+
     def showEvent(self, event):
         """S'active quand on clique sur l'onglet"""
         self.apply_theme()
+        if self.team_mode_enabled:
+            self.refresh_team_list()
+            if not self.team_timer_poll.isActive():
+                self.team_timer_poll.start(6000)
+            if not self.team_timer_tick.isActive():
+                self.team_timer_tick.start(1000)
         super().showEvent(event)
+
+    def hideEvent(self, event):
+        if self.team_timer_poll.isActive():
+            self.team_timer_poll.stop()
+        if self.team_timer_tick.isActive():
+            self.team_timer_tick.stop()
+        super().hideEvent(event)
+
+    def on_team_mode_toggled(self, state):
+        self._set_team_mode(bool(state))
+
+    def _set_team_mode(self, enabled):
+        self.team_mode_enabled = enabled
+        if hasattr(self, "team_mode_label"):
+            self.team_mode_label.setText("Mode: Team" if enabled else "Mode: Solo")
+        if hasattr(self, "team_mode_toggle"):
+            self.team_mode_toggle.blockSignals(True)
+            self.team_mode_toggle.setChecked(enabled)
+            self.team_mode_toggle.blockSignals(False)
+        if hasattr(self, "team_picker_widget"):
+            self.team_picker_widget.setVisible(enabled)
+
+        if enabled:
+            self.refresh_team_list()
+            if not self.team_timer_poll.isActive():
+                self.team_timer_poll.start(6000)
+            if not self.team_timer_tick.isActive():
+                self.team_timer_tick.start(1000)
+        else:
+            if self.team_timer_poll.isActive():
+                self.team_timer_poll.stop()
+            if self.team_timer_tick.isActive():
+                self.team_timer_tick.stop()
+
+        self._update_team_session_visibility()
+
+    def _update_team_session_visibility(self):
+        if not hasattr(self, "team_session_card"):
+            return
+        if not self.team_mode_enabled:
+            self.team_session_card.hide()
+            return
+        if self.team_selected_id:
+            self.team_session_card.show()
+        else:
+            self.team_session_card.hide()
+
+    def activate_team_mode(self, team_id=None, start_focus=False):
+        self._set_team_mode(True)
+        self.refresh_team_list()
+        if team_id is not None and hasattr(self, "team_combo"):
+            idx = self.team_combo.findData(team_id)
+            if idx >= 0:
+                self.team_combo.setCurrentIndex(idx)
+            self.team_selected_id = team_id
+        self._update_team_session_visibility()
+        if start_focus:
+            self.start_team_focus()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -256,7 +422,13 @@ class PomodoroPage(QWidget):
         self.left_vbox.addWidget(self.header_title)
         self.left_vbox.addWidget(self.header_sub)
         self.left_vbox.addWidget(self.current_task_card)
-        self.left_vbox.addSpacing(20)
+        self.left_vbox.addSpacing(16)
+        self._build_team_mode_card()
+        self.left_vbox.addWidget(self.team_mode_card)
+        self._build_team_session_card()
+        self.left_vbox.addWidget(self.team_session_card)
+        self.left_vbox.addSpacing(14)
+        self._set_team_mode(False)
 
         self.badge = QLabel("FOCUS TIME")
         self.badge.setObjectName("PomodoroBadge")
@@ -561,10 +733,12 @@ class PomodoroPage(QWidget):
         self._update_next_label()
         self._style_break_tips()
         self._style_current_task_card()
+        self._style_team_session_card()
         self._sync_focus_mode_toggle()
         self._update_session_progress()
         self._apply_responsive_sizes()
         self._apply_control_icons()
+        self._update_team_session_visibility()
 
     def _apply_control_icons(self):
         style = QApplication.style() if QApplication.instance() else None
@@ -672,6 +846,216 @@ class PomodoroPage(QWidget):
             self.focus_mode_toggle._active_color = toggle_on
             self.focus_mode_toggle._circle_color = toggle_thumb
             self.focus_mode_toggle.update()
+
+    def _style_team_session_card(self):
+        if not hasattr(self, "team_session_card"):
+            return
+        colors = self._theme_colors or {}
+        card_bg = colors.get("card_alt", "#0f2238" if self._is_dark else "#ffffff")
+        card_border = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        text_main = colors.get("text_main", "#e2e8f0" if self._is_dark else "#113356")
+        text_sub = colors.get("text_sub", "#94a3b8" if self._is_dark else "#47617C")
+        accent = colors.get("accent", "#82AFF2" if self._is_dark else "#3078CD")
+        deep = colors.get("deep", "#25456B")
+        input_bg = colors.get("input_bg", card_bg)
+        toggle_off = colors.get("border", "#25456B" if self._is_dark else "#BAD2E0")
+        toggle_on = colors.get("accent", "#82AFF2" if self._is_dark else "#3078CD")
+        toggle_thumb = colors.get("text_main", "#e2e8f0" if self._is_dark else "#ffffff")
+
+        if hasattr(self, "team_mode_card"):
+            self.team_mode_card.setStyleSheet(
+                f"QFrame#TeamModeCard {{ background-color: {card_bg}; border: 1px solid {card_border}; border-radius: 16px; }}"
+            )
+        if hasattr(self, "team_mode_label"):
+            self.team_mode_label.setStyleSheet(
+                f"color: {text_main}; font-size: 12px; font-weight: 700; background: transparent;"
+            )
+        if hasattr(self, "team_mode_toggle"):
+            self.team_mode_toggle._bg_color = toggle_off
+            self.team_mode_toggle._active_color = toggle_on
+            self.team_mode_toggle._circle_color = toggle_thumb
+            self.team_mode_toggle.update()
+
+        self.team_session_card.setStyleSheet(
+            f"QFrame#TeamSessionCard {{ background-color: {card_bg}; border: 1px solid {card_border}; border-radius: 16px; }}"
+        )
+        self.team_title.setStyleSheet(
+            f"color: {accent}; font-size: 11px; font-weight: 800; background: transparent;"
+        )
+        self.team_status_label.setStyleSheet(
+            f"color: {text_sub}; font-size: 12px; font-weight: 600; background: transparent;"
+        )
+        self.team_phase_label.setStyleSheet(
+            f"color: {text_sub}; font-size: 12px; font-weight: 600; background: transparent;"
+        )
+        self.team_timer_label.setStyleSheet(
+            f"color: {text_main}; font-size: 20px; font-weight: 900; background: transparent;"
+        )
+        self.team_combo.setStyleSheet(
+            f"QComboBox {{ background: {input_bg}; border: 1px solid {card_border}; border-radius: 8px; "
+            f"padding: 6px 10px; color: {text_main}; }}"
+            f"QComboBox::drop-down {{ border: none; }}"
+            f"QComboBox QAbstractItemView {{ background: {input_bg}; color: {text_main}; selection-background-color: {accent}; }}"
+        )
+        for btn in (self.btn_team_refresh, self.btn_team_focus, self.btn_team_break, self.btn_team_stop):
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {accent}; color: white; border-radius: 10px; font-weight: 700; padding: 4px 10px; }}"
+                f"QPushButton:hover {{ background-color: {deep}; }}"
+            )
+        if hasattr(self, "btn_team_stop"):
+            stop = colors.get("bad", "#ef4444")
+            self.btn_team_stop.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; color: {stop}; border: 1px solid {stop}; "
+                f"border-radius: 10px; font-weight: 700; padding: 4px 10px; }}"
+                f"QPushButton:hover {{ background-color: {input_bg}; }}"
+            )
+
+    def refresh_team_list(self):
+        if not hasattr(self, "team_combo"):
+            return
+        if not self.team_mode_enabled:
+            return
+        try:
+            res = api_list_teams()
+        except ApiError as e:
+            self.team_combo.blockSignals(True)
+            self.team_combo.clear()
+            self.team_combo.addItem("Team sync unavailable")
+            self.team_combo.blockSignals(False)
+            self.team_status_label.setText(f"Status: {str(e)}")
+            self.team_selected_id = None
+            self._update_team_session_visibility()
+            return
+        teams = res.get("teams", []) if isinstance(res, dict) else []
+        current_id = self.team_selected_id
+        self.team_combo.blockSignals(True)
+        self.team_combo.clear()
+        if not teams:
+            self.team_combo.addItem("No teams", None)
+            self.team_selected_id = None
+        else:
+            self.team_combo.addItem("Select a team", None)
+            selected_index = 0
+            for idx, team in enumerate(teams, start=1):
+                team_id = team.get("id")
+                name = team.get("name") or f"Team {team_id}"
+                self.team_combo.addItem(name, team_id)
+                if current_id and team_id == current_id:
+                    selected_index = idx
+            self.team_combo.setCurrentIndex(selected_index)
+            self.team_selected_id = self.team_combo.currentData()
+        self.team_combo.blockSignals(False)
+        self._update_team_session_visibility()
+        if self.team_selected_id:
+            self.refresh_team_session()
+
+    def _on_team_changed(self, index):
+        self.team_selected_id = self.team_combo.currentData()
+        self._update_team_session_visibility()
+        if self.team_selected_id:
+            self.refresh_team_session()
+
+    def refresh_team_session(self):
+        if not self.team_mode_enabled:
+            return
+        if not self.team_selected_id:
+            self.team_status_label.setText("Status: Idle")
+            self.team_phase_label.setText("Phase: -")
+            self.team_timer_label.setText("--:--")
+            self.team_remaining_seconds = None
+            return
+        try:
+            res = api_get_team_pomodoro(self.team_selected_id)
+        except ApiError as e:
+            self.team_status_label.setText(f"Status: {str(e)}")
+            return
+        if not isinstance(res, dict):
+            self.team_status_label.setText("Status: Idle")
+            return
+        self.team_status = res.get("status") or "idle"
+        self.team_phase = res.get("phase") or "-"
+        remaining = res.get("remaining_seconds")
+        if remaining is None and res.get("started_at") and res.get("duration_min"):
+            remaining = self._compute_remaining(res.get("started_at"), res.get("duration_min"))
+        self.team_remaining_seconds = remaining
+        self.team_status_label.setText(f"Status: {self.team_status.title()}")
+        self.team_phase_label.setText(f"Phase: {str(self.team_phase).title()}")
+        if remaining is None:
+            self.team_timer_label.setText("--:--")
+        else:
+            self.team_timer_label.setText(self._format_seconds(remaining))
+
+    def start_team_focus(self):
+        if not self.team_selected_id:
+            self.team_status_label.setText("Status: Select a team first")
+            return
+        duration = int(getattr(self, "focus_input", None).value()) if hasattr(self, "focus_input") else 25
+        try:
+            api_start_team_pomodoro(self.team_selected_id, "focus", duration)
+        except ApiError as e:
+            self.team_status_label.setText(f"Status: {str(e)}")
+            return
+        self.refresh_team_session()
+
+    def start_team_break(self):
+        if not self.team_selected_id:
+            self.team_status_label.setText("Status: Select a team first")
+            return
+        duration = int(getattr(self, "short_input", None).value()) if hasattr(self, "short_input") else 5
+        try:
+            api_start_team_pomodoro(self.team_selected_id, "break", duration)
+        except ApiError as e:
+            self.team_status_label.setText(f"Status: {str(e)}")
+            return
+        self.refresh_team_session()
+
+    def stop_team_session(self):
+        if not self.team_selected_id:
+            return
+        try:
+            api_stop_team_pomodoro(self.team_selected_id)
+        except ApiError as e:
+            self.team_status_label.setText(f"Status: {str(e)}")
+            return
+        self.refresh_team_session()
+
+    def _tick_team_countdown(self):
+        if self.team_status != "running":
+            return
+        if self.team_remaining_seconds is None:
+            return
+        self.team_remaining_seconds = max(0, self.team_remaining_seconds - 1)
+        self.team_timer_label.setText(self._format_seconds(self.team_remaining_seconds))
+        if self.team_remaining_seconds <= 0:
+            self.team_status = "completed"
+            self.team_status_label.setText("Status: Completed")
+
+    def _format_seconds(self, total_seconds):
+        try:
+            total_seconds = int(total_seconds)
+        except Exception:
+            total_seconds = 0
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _compute_remaining(self, started_at, duration_min):
+        try:
+            try:
+                duration_min = int(duration_min)
+            except Exception:
+                duration_min = 0
+            if isinstance(started_at, str):
+                if started_at.endswith("Z"):
+                    started_at = started_at.replace("Z", "+00:00")
+                started = datetime.fromisoformat(started_at)
+            else:
+                started = started_at
+            now = datetime.now(tz=started.tzinfo)
+            elapsed = (now - started).total_seconds()
+            return int(max(0, duration_min * 60 - elapsed))
+        except Exception:
+            return None
 
     def _sync_focus_mode_toggle(self):
         if not hasattr(self, "focus_mode_toggle"):

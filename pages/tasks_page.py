@@ -887,10 +887,10 @@ class TasksPage(QWidget):
         txt_layout = QVBoxLayout()
         txt_layout.setSpacing(6)
 
-        self.welcome = QLabel("WELCOME")
-        self.title = QLabel("Your Creative Flow")
+        self.welcome = QLabel("MY TASKS")
+        self.title = QLabel("Personal Workspace")
         self.title.setWordWrap(True)
-        self.subtitle = QLabel("")
+        self.subtitle = QLabel("Your solo task list")
         self.subtitle.setWordWrap(True)
 
         txt_layout.addWidget(self.welcome)
