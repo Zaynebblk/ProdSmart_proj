@@ -220,6 +220,9 @@ class PomodoroPage(QWidget):
         self._set_team_mode(bool(state))
 
     def _set_team_mode(self, enabled):
+        if enabled and not self._has_team_mode_ui():
+            self.team_mode_enabled = False
+            return
         self.team_mode_enabled = enabled
         if hasattr(self, "team_mode_label"):
             self.team_mode_label.setText("Mode: Team" if enabled else "Mode: Solo")
@@ -256,6 +259,8 @@ class PomodoroPage(QWidget):
             self.team_session_card.hide()
 
     def activate_team_mode(self, team_id=None, start_focus=False):
+        if not self._has_team_mode_ui():
+            return
         self._set_team_mode(True)
         self.refresh_team_list()
         if team_id is not None and hasattr(self, "team_combo"):
@@ -423,12 +428,6 @@ class PomodoroPage(QWidget):
         self.left_vbox.addWidget(self.header_sub)
         self.left_vbox.addWidget(self.current_task_card)
         self.left_vbox.addSpacing(16)
-        self._build_team_mode_card()
-        self.left_vbox.addWidget(self.team_mode_card)
-        self._build_team_session_card()
-        self.left_vbox.addWidget(self.team_session_card)
-        self.left_vbox.addSpacing(14)
-        self._set_team_mode(False)
 
         self.badge = QLabel("FOCUS TIME")
         self.badge.setObjectName("PomodoroBadge")
@@ -922,7 +921,8 @@ class PomodoroPage(QWidget):
             self.team_combo.clear()
             self.team_combo.addItem("Team sync unavailable")
             self.team_combo.blockSignals(False)
-            self.team_status_label.setText(f"Status: {str(e)}")
+            if self._has_team_session_ui():
+                self.team_status_label.setText(f"Status: {str(e)}")
             self.team_selected_id = None
             self._update_team_session_visibility()
             return
@@ -956,6 +956,12 @@ class PomodoroPage(QWidget):
             self.refresh_team_session()
 
     def refresh_team_session(self):
+        if not self._has_team_session_ui():
+            if self.team_timer_poll.isActive():
+                self.team_timer_poll.stop()
+            if self.team_timer_tick.isActive():
+                self.team_timer_tick.stop()
+            return
         if not self.team_mode_enabled:
             return
         if not self.team_selected_id:
@@ -986,6 +992,8 @@ class PomodoroPage(QWidget):
             self.team_timer_label.setText(self._format_seconds(remaining))
 
     def start_team_focus(self):
+        if not self._has_team_session_ui():
+            return
         if not self.team_selected_id:
             self.team_status_label.setText("Status: Select a team first")
             return
@@ -998,6 +1006,8 @@ class PomodoroPage(QWidget):
         self.refresh_team_session()
 
     def start_team_break(self):
+        if not self._has_team_session_ui():
+            return
         if not self.team_selected_id:
             self.team_status_label.setText("Status: Select a team first")
             return
@@ -1010,6 +1020,8 @@ class PomodoroPage(QWidget):
         self.refresh_team_session()
 
     def stop_team_session(self):
+        if not self._has_team_session_ui():
+            return
         if not self.team_selected_id:
             return
         try:
@@ -1020,6 +1032,8 @@ class PomodoroPage(QWidget):
         self.refresh_team_session()
 
     def _tick_team_countdown(self):
+        if not self._has_team_session_ui():
+            return
         if self.team_status != "running":
             return
         if self.team_remaining_seconds is None:
@@ -1029,6 +1043,16 @@ class PomodoroPage(QWidget):
         if self.team_remaining_seconds <= 0:
             self.team_status = "completed"
             self.team_status_label.setText("Status: Completed")
+
+    def _has_team_mode_ui(self):
+        return hasattr(self, "team_combo")
+
+    def _has_team_session_ui(self):
+        return (
+            hasattr(self, "team_status_label")
+            and hasattr(self, "team_phase_label")
+            and hasattr(self, "team_timer_label")
+        )
 
     def _format_seconds(self, total_seconds):
         try:

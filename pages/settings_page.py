@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox,
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty
 from PyQt6.QtGui import QPainter, QColor
 from resources.theme import get_theme, FONT_FAMILY, rgba
-from resources.api_client import api_ping, ApiError, set_base_url
+from resources.api_client import check_server_ready, set_base_url
 from resources.task_types import TASK_TYPES, UNCATEGORIZED_LABEL
 
 # --- CUSTOM TOGGLE SWITCH CLASS ---
@@ -568,14 +568,11 @@ class SettingsPage(QWidget):
             pass
 
         # If already running, no need to start a new one
-        try:
-            api_ping()
+        if check_server_ready(url, timeout=0.4):
             if hasattr(self, "server_status"):
                 self.server_status.setText("Server status: running")
             QMessageBox.information(self, "Server", "Server is already running.")
             return
-        except ApiError:
-            pass
 
         server_path = os.path.join(os.getcwd(), "server", "main.py")
         if not os.path.exists(server_path):

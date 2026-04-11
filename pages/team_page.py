@@ -1,22 +1,31 @@
+from datetime import datetime
+import json
+import os
+import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QComboBox, QScrollArea, QLineEdit, QDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt, QDate, pyqtSignal
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer
 from pages.tasks_page import AddTaskDialog, TaskCard, ViewTaskDialog
-from resources.priority import quadrant_from_flags
+from database.db_manager import get_db_connection
+from resources.priority import quadrant_from_flags, normalize_priority
 from resources.task_types import normalize_task_type
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.time_format import format_duration_minutes
 from resources.api_client import (
     ApiError,
     api_list_teams,
     api_create_team,
     api_join_team,
     api_get_team,
+    api_list_team_members,
     api_list_team_tasks,
     api_create_team_task,
     api_update_team_task,
     api_delete_team_task,
+    api_list_team_messages,
+    api_send_team_message,
     get_base_url,
 )
 
@@ -29,6 +38,7 @@ class NoWheelComboBox(QComboBox):
 class TeamPage(QWidget):
     task_added = pyqtSignal()
     team_pomodoro_requested = pyqtSignal(int, bool)
+    team_task_pomodoro_requested = pyqtSignal(str, str, object, object)
     def __init__(self):
         super().__init__()
         self.setObjectName("TeamPage")
@@ -36,6 +46,8 @@ class TeamPage(QWidget):
         self.current_team_id = None
         self.team_meta = {}
         self._tasks_cache = {}
+        self.chat_timer = QTimer()
+        self.chat_timer.timeout.connect(self.refresh_chat)
         self._build_ui()
 
     def _build_ui(self):
@@ -90,6 +102,103 @@ class TeamPage(QWidget):
         self.join_code_label.setObjectName("TeamJoinCode")
         layout.addWidget(self.join_code_label)
 
+        self.members_card = QFrame()
+        self.members_card.setObjectName("TeamMembersCard")
+        members_layout = QVBoxLayout(self.members_card)
+        members_layout.setContentsMargins(16, 14, 16, 14)
+        members_layout.setSpacing(12)
+
+        members_header = QHBoxLayout()
+        self.members_title = QLabel("Team Members")
+        self.members_title.setObjectName("TeamMembersTitle")
+        self.members_count = QLabel("0 ACTIVE")
+        self.members_count.setObjectName("TeamMembersCount")
+        members_header.addWidget(self.members_title)
+        members_header.addStretch()
+        members_header.addWidget(self.members_count)
+        members_layout.addLayout(members_header)
+
+        self.members_list = QVBoxLayout()
+        self.members_list.setSpacing(10)
+        self.members_list.setContentsMargins(2, 2, 2, 2)
+
+        self.members_container = QWidget()
+        self.members_container.setLayout(self.members_list)
+        self.members_scroll = QScrollArea()
+        self.members_scroll.setWidgetResizable(True)
+        self.members_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.members_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.members_scroll.setWidget(self.members_container)
+        self.members_scroll.setFixedHeight(240)
+        members_layout.addWidget(self.members_scroll)
+
+        self.members_empty = QLabel("No members yet.")
+        self.members_empty.setObjectName("TeamEmpty")
+        self.members_list.addWidget(self.members_empty)
+
+        self.chat_card = QFrame()
+        self.chat_card.setObjectName("TeamChatCard")
+        chat_layout = QVBoxLayout(self.chat_card)
+        chat_layout.setContentsMargins(16, 14, 16, 14)
+        chat_layout.setSpacing(12)
+
+        chat_header = QHBoxLayout()
+        self.chat_title = QLabel("Team Chat")
+        self.chat_title.setObjectName("TeamChatTitle")
+        self.chat_hint = QLabel("")
+        self.chat_hint.setObjectName("TeamChatHint")
+        chat_header.addWidget(self.chat_title)
+        chat_header.addStretch()
+
+        chat_header.addWidget(self.chat_hint)
+        chat_layout.addLayout(chat_header)
+
+        self.chat_list = QVBoxLayout()
+        self.chat_list.setSpacing(12)
+        self.chat_list.setContentsMargins(6, 6, 6, 6)
+
+        self.chat_container = QWidget()
+        self.chat_container.setLayout(self.chat_list)
+        self.chat_scroll = QScrollArea()
+        self.chat_scroll.setWidgetResizable(True)
+        self.chat_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.chat_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.chat_scroll.setWidget(self.chat_container)
+        self.chat_scroll.setFixedHeight(300)
+        chat_layout.addWidget(self.chat_scroll)
+
+        self.chat_empty = QLabel("No messages yet.")
+        self.chat_empty.setObjectName("TeamEmpty")
+        self.chat_list.addWidget(self.chat_empty)
+
+        chat_input_row = QHBoxLayout()
+        chat_input_row.setSpacing(10)
+
+        self.chat_input_card = QFrame()
+        self.chat_input_card.setObjectName("TeamChatInputCard")
+        input_layout = QHBoxLayout(self.chat_input_card)
+        input_layout.setContentsMargins(14, 6, 14, 6)
+        input_layout.setSpacing(8)
+
+        self.chat_input = QLineEdit()
+        self.chat_input.setObjectName("TeamChatInput")
+        self.chat_input.setPlaceholderText("Message the team...")
+        self.chat_input.setFixedHeight(32)
+        self.chat_input.setFrame(False)
+        self.chat_input.returnPressed.connect(self.send_chat_message)
+        input_layout.addWidget(self.chat_input, 1)
+
+        chat_input_row.addWidget(self.chat_input_card, 1)
+
+        self.chat_send_btn = QPushButton(">")
+        self.chat_send_btn.setObjectName("TeamChatSend")
+        self.chat_send_btn.setFixedSize(44, 44)
+        self.chat_send_btn.clicked.connect(self.send_chat_message)
+        chat_input_row.addWidget(self.chat_send_btn)
+        chat_layout.addLayout(chat_input_row)
+        layout.addWidget(self.members_card)
+        layout.addWidget(self.chat_card)
+
         tasks_header = QHBoxLayout()
         self.tasks_title = QLabel("Team Tasks")
         self.tasks_title.setObjectName("TeamSectionTitle")
@@ -126,7 +235,23 @@ class TeamPage(QWidget):
             f"QLabel#TeamJoinCode {{ color: {c['sub']}; font-weight: 600; }}"
             f"QLabel#TeamSectionTitle {{ color: {c['text']}; font-size: 18px; font-weight: 800; }}"
             f"QLabel#TeamEmpty {{ color: {c['sub']}; font-size: 12px; }}"
+            f"QFrame#TeamMembersCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 18px; }}"
+            f"QFrame#TeamChatCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 18px; }}"
+            f"QLabel#TeamMembersTitle {{ color: {c['text']}; font-size: 14px; font-weight: 800; }}"
+            f"QLabel#TeamChatTitle {{ color: {c['text']}; font-size: 14px; font-weight: 800; }}"
+            f"QLabel#TeamMembersCount {{ background: transparent; color: {c['sub']}; padding: 2px 2px; font-size: 10px; font-weight: 800; }}"
+            f"QLabel#TeamChatHint {{ background: {rgba(c['accent'], 0.2)}; color: {c['accent']}; border-radius: 10px; padding: 2px 8px; font-size: 9px; font-weight: 800; }}"
+            f"QFrame#TeamChatInputCard {{ background: {rgba(c['card_alt'], 0.85)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 22px; }}"
+            f"QLineEdit#TeamChatInput {{ background: transparent; border: none; padding: 0 4px; color: {c['text']}; font-size: 12px; }}"
+            f"QPushButton#TeamChatSend {{ background: {c['primary_gradient']}; color: white; border-radius: 22px; padding: 0; font-weight: 900; }}"
+            f"QPushButton#TeamChatSend:hover {{ background: {c['accent']}; }}"
         )
+        if hasattr(self, "members_container"):
+            self.members_container.setStyleSheet("QWidget { background: transparent; }")
+        if hasattr(self, "chat_container"):
+            self.chat_container.setStyleSheet(
+                f"QWidget {{ background: {rgba(c['card'], 0.85)}; border: 1px solid {rgba(c['border'], 0.6)}; border-radius: 16px; }}"
+            )
         for i in range(self.tasks_layout.count()):
             item = self.tasks_layout.itemAt(i)
             widget = item.widget() if item else None
@@ -164,6 +289,10 @@ class TeamPage(QWidget):
         if not team_id:
             self.join_code_label.setText("Join code: -")
             self._render_tasks([])
+            self._render_members([])
+            self._render_chat([])
+            if self.chat_timer.isActive():
+                self.chat_timer.stop()
             return
         try:
             info = api_get_team(team_id)
@@ -174,6 +303,10 @@ class TeamPage(QWidget):
                 self.join_code_label.setText("Join code: -")
         except ApiError:
             self.join_code_label.setText("Join code: -")
+        self.refresh_members()
+        self.refresh_chat()
+        if not self.chat_timer.isActive():
+            self.chat_timer.start(5000)
         self.refresh_tasks()
 
     def refresh_tasks(self):
@@ -187,9 +320,54 @@ class TeamPage(QWidget):
             return
         tasks = res.get("tasks", []) if isinstance(res, dict) else []
         self._tasks_cache = {t.get("id"): t for t in tasks if isinstance(t, dict)}
-        self._render_tasks(tasks)
+        focus_map = self._load_focus_minutes(tasks)
+        self._render_tasks(tasks, focus_map)
 
-    def _render_tasks(self, tasks):
+    def refresh_members(self):
+        if not self.current_team_id:
+            self._render_members([])
+            return
+        try:
+            res = api_list_team_members(self.current_team_id)
+        except ApiError as e:
+            QMessageBox.warning(self, "Team Members", str(e))
+            return
+        members = res.get("members", []) if isinstance(res, dict) else []
+        self._render_members(members)
+
+    def refresh_chat(self):
+        if not self.current_team_id:
+            self._render_chat([])
+            return
+        try:
+            res = api_list_team_messages(self.current_team_id, limit=50)
+        except ApiError:
+            return
+        except Exception:
+            return
+        messages = res.get("messages", []) if isinstance(res, dict) else []
+        self._render_chat(messages)
+
+    def pause_network(self):
+        if self.chat_timer.isActive():
+            self.chat_timer.stop()
+
+    def send_chat_message(self):
+        if not self.current_team_id:
+            QMessageBox.information(self, "Team Chat", "Please select a team first.")
+            return
+        msg = self.chat_input.text().strip() if hasattr(self, "chat_input") else ""
+        if not msg:
+            return
+        try:
+            api_send_team_message(self.current_team_id, msg)
+        except ApiError as e:
+            QMessageBox.warning(self, "Team Chat", str(e))
+            return
+        self.chat_input.clear()
+        self.refresh_chat()
+
+    def _render_tasks(self, tasks, focus_map=None):
         while self.tasks_layout.count():
             item = self.tasks_layout.takeAt(0)
             widget = item.widget()
@@ -209,9 +387,223 @@ class TeamPage(QWidget):
             self.tasks_layout.addWidget(self.empty_label)
         else:
             for t in tasks:
-                card = self._build_task_card(t)
+                focus_minutes = 0
+                if focus_map is not None:
+                    try:
+                        focus_minutes = int(focus_map.get(t.get("id"), 0) or 0)
+                    except Exception:
+                        focus_minutes = 0
+                card = self._build_task_card(t, focus_minutes)
                 if card:
                     self.tasks_layout.addWidget(card)
+
+    def _current_username(self):
+        settings_path = os.path.join(os.getcwd(), "settings.json")
+        try:
+            if os.path.exists(settings_path):
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("cloud_username")
+        except Exception:
+            return None
+        return None
+
+    def _member_avatar_colors(self, username):
+        c = get_theme(self.current_theme)
+        palette = [c["accent"], c["accent2"], c["deep"], c["chip_text"]]
+        key = sum(ord(ch) for ch in (username or "")) % len(palette)
+        base = palette[key]
+        return rgba(base, 0.22), base
+
+    def _build_member_card(self, username, role):
+        c = get_theme(self.current_theme)
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background: {c['card']}; border: 1px solid {rgba(c['border'], 0.6)}; border-radius: 16px; }}"
+        )
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+
+        initials = "".join([part[:1] for part in re.split(r"[^A-Za-z0-9]+", username or "") if part])[:2].upper()
+        if not initials:
+            initials = "U"
+        if (role or "").lower() == "owner":
+            avatar_bg = rgba(c["accent"], 0.28)
+            avatar_fg = c["accent"]
+        else:
+            avatar_bg = rgba(c["chip_text"], 0.2)
+            avatar_fg = c["text"]
+        avatar = QLabel(initials)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setFixedSize(44, 44)
+        avatar.setStyleSheet(
+            f"background: {avatar_bg}; color: {avatar_fg}; border-radius: 20px; font-weight: 800;"
+        )
+        layout.addWidget(avatar)
+
+        name_col = QVBoxLayout()
+        name_col.setSpacing(2)
+        name = QLabel(username or "Unknown")
+        name.setStyleSheet(f"font-size: 12px; font-weight: 800; color: {c['text']};")
+        role_text = "Lead Designer" if (role or "").lower() == "owner" else "Team Member"
+        subtitle = QLabel(role_text)
+        subtitle.setStyleSheet(f"font-size: 10px; color: {c['sub']}; font-weight: 600;")
+        name_col.addWidget(name)
+        name_col.addWidget(subtitle)
+        layout.addLayout(name_col)
+        layout.addStretch()
+
+        badge_text = (role or "member").upper()
+        if (role or "").lower() == "owner":
+            badge_bg = rgba(c["accent"], 0.22)
+            badge_fg = c["accent"]
+        else:
+            badge_bg = rgba(c["chip_text"], 0.18)
+            badge_fg = c["sub"]
+        badge = QLabel(badge_text)
+        badge.setStyleSheet(
+            f"background: {badge_bg}; color: {badge_fg}; border-radius: 10px; padding: 2px 10px; "
+            f"font-size: 9px; font-weight: 800; letter-spacing: 1px;"
+        )
+        layout.addWidget(badge)
+        return card
+
+    def _render_members(self, members):
+        while self.members_list.count():
+            item = self.members_list.takeAt(0)
+            widget = item.widget()
+            if widget:
+                self.members_list.removeWidget(widget)
+                if widget is not self.members_empty:
+                    widget.deleteLater()
+        try:
+            self.members_empty.hide()
+        except Exception:
+            pass
+        if not members:
+            try:
+                self.members_empty.show()
+            except Exception:
+                pass
+            self.members_list.addWidget(self.members_empty)
+            if hasattr(self, "members_count"):
+                self.members_count.setText("0 ACTIVE")
+            return
+        if hasattr(self, "members_count"):
+            self.members_count.setText(f"{len(members)} ACTIVE")
+        for m in members:
+            username = m.get("username") if isinstance(m, dict) else None
+            role = m.get("role") if isinstance(m, dict) else None
+            card = self._build_member_card(username, role)
+            self.members_list.addWidget(card)
+
+    def _render_chat(self, messages):
+        c = get_theme(self.current_theme)
+        while self.chat_list.count():
+            item = self.chat_list.takeAt(0)
+            widget = item.widget()
+            if widget:
+                self.chat_list.removeWidget(widget)
+                if widget is not self.chat_empty:
+                    widget.deleteLater()
+        try:
+            self.chat_empty.hide()
+        except Exception:
+            pass
+        if not messages:
+            try:
+                self.chat_empty.show()
+            except Exception:
+                pass
+            self.chat_list.addWidget(self.chat_empty)
+            if hasattr(self, "chat_hint"):
+                self.chat_hint.setText("Live")
+            self._update_chat_avatars([])
+            return
+        if hasattr(self, "chat_hint"):
+            self.chat_hint.setText("")
+
+        current_user = (self._current_username() or "").strip().lower()
+        participants = []
+        for msg in messages:
+            username = msg.get("username") if isinstance(msg, dict) else None
+            if not username:
+                continue
+            uname = str(username)
+            if uname not in participants:
+                participants.append(uname)
+        self._update_chat_avatars(participants)
+        for msg in messages:
+            username = msg.get("username") if isinstance(msg, dict) else None
+            text = msg.get("message") if isinstance(msg, dict) else None
+            created_at = msg.get("created_at") if isinstance(msg, dict) else None
+            is_own = bool(current_user and username and str(username).strip().lower() == current_user)
+
+            bubble = QFrame()
+            if is_own:
+                bubble_bg = c["card"]
+                border = rgba(c["border"], 0.7)
+            else:
+                bubble_bg = c["card_alt"]
+                border = rgba(c["border"], 0.5)
+            bubble.setStyleSheet(
+                f"QFrame {{ background: {bubble_bg}; border: 1px solid {border}; border-radius: 14px; }}"
+            )
+            bubble.setMaximumWidth(520)
+            bubble_layout = QVBoxLayout(bubble)
+            bubble_layout.setContentsMargins(12, 10, 12, 10)
+            bubble_layout.setSpacing(4)
+
+            header = QHBoxLayout()
+            if not is_own:
+                name = QLabel(str(username or "User").upper())
+                name.setStyleSheet(f"font-size: 9px; font-weight: 800; color: {c['accent']}; letter-spacing: 1px;")
+                header.addWidget(name)
+            header.addStretch()
+            stamp = self._format_chat_time(created_at)
+            if stamp:
+                time_lbl = QLabel(stamp)
+                time_lbl.setStyleSheet(f"font-size: 9px; color: {c['sub']};")
+                header.addWidget(time_lbl)
+            bubble_layout.addLayout(header)
+
+            body = QLabel(text or "")
+            body.setWordWrap(True)
+            body.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {c['text']};")
+            bubble_layout.addWidget(body)
+
+            wrapper = QWidget()
+            row = QHBoxLayout(wrapper)
+            row.setContentsMargins(0, 0, 0, 0)
+            if is_own:
+                row.addStretch()
+                row.addWidget(bubble)
+            else:
+                row.addWidget(bubble)
+                row.addStretch()
+            self.chat_list.addWidget(wrapper)
+
+        try:
+            bar = self.chat_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        except Exception:
+            pass
+
+    def _update_chat_avatars(self, usernames):
+        return
+
+    def _format_chat_time(self, raw):
+        if not raw:
+            return ""
+        raw_text = str(raw).replace("T", " ").split(".")[0]
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(raw_text, fmt)
+                return dt.strftime("%I:%M %p").lstrip("0")
+            except Exception:
+                continue
+        return raw_text
 
     def create_team(self):
         name, ok = self._prompt_text("Create Team", "Team name")
@@ -321,6 +713,58 @@ class TeamPage(QWidget):
             is_urg = self._deadline_is_urgent(task.get("due_date"))
         priority = task.get("priority") or quadrant_from_flags(is_urg, is_imp)
         task_type = normalize_task_type(task.get("task_type"))
+        total_focus_min = 0
+        total_sessions = 0
+        sessions_widgets = []
+        session_key = None
+        if self.current_team_id:
+            session_key = self._team_session_key(self.current_team_id, t_id)
+        if session_key:
+            conn = None
+            try:
+                conn = get_db_connection()
+                total_row = conn.execute(
+                    "SELECT COALESCE(SUM(duration_min), 0) FROM pomodoro_sessions WHERE task_id=? AND status='completed'",
+                    (session_key,)
+                ).fetchone()
+                if total_row:
+                    total_focus_min = int(total_row[0] or 0)
+
+                total_sessions_row = conn.execute(
+                    "SELECT COUNT(*) FROM pomodoro_sessions WHERE task_id=?",
+                    (session_key,)
+                ).fetchone()
+                if total_sessions_row:
+                    total_sessions = int(total_sessions_row[0] or 0)
+
+                sess_rows = conn.execute(
+                    "SELECT started_at, duration_min, status FROM pomodoro_sessions WHERE task_id=? ORDER BY started_at DESC",
+                    (session_key,)
+                ).fetchall()
+                for started_at, duration_min, status in sess_rows:
+                    display_time = "Unknown time"
+                    if started_at:
+                        raw = str(started_at).split(".")[0]
+                        dt = None
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                            try:
+                                dt = datetime.strptime(raw, fmt)
+                                break
+                            except ValueError:
+                                continue
+                        if dt:
+                            display_time = dt.strftime("%b %d, %H:%M")
+                    dur = int(duration_min or 0)
+                    st = str(status or "").lower()
+                    status_text = st if st else "completed"
+                    lbl = QLabel(f"{display_time}  -  {format_duration_minutes(dur)}  ({status_text})")
+                    lbl.setStyleSheet("font-size: 11px; font-weight: 600;")
+                    sessions_widgets.append(lbl)
+            except Exception:
+                sessions_widgets = []
+            finally:
+                if conn:
+                    conn.close()
         ViewTaskDialog(
             task.get("title") or "",
             task.get("description") or "",
@@ -328,9 +772,9 @@ class TeamPage(QWidget):
             created_pretty,
             priority,
             task_type,
-            0,
-            0,
-            [],
+            total_focus_min,
+            total_sessions,
+            sessions_widgets,
             self,
             theme=self.current_theme,
         ).exec()
@@ -339,9 +783,11 @@ class TeamPage(QWidget):
         if not self.current_team_id:
             QMessageBox.information(self, "Team Focus", "Select a team before starting a team session.")
             return
-        self.team_pomodoro_requested.emit(self.current_team_id, True)
+        session_key = self._team_session_key(self.current_team_id, t_id)
+        prio = normalize_priority(priority) or "too low"
+        self.team_task_pomodoro_requested.emit(session_key, title, prio, normalize_task_type(task_type))
 
-    def _build_task_card(self, task):
+    def _build_task_card(self, task, focus_minutes=0):
         if not isinstance(task, dict):
             return None
         due_pretty = self._pretty_due(task.get("due_date"))
@@ -359,7 +805,7 @@ class TeamPage(QWidget):
             due_pretty,
             created_pretty,
             priority,
-            0,
+            focus_minutes,
             self,
             bool(task.get("is_completed")),
             task_type,
@@ -398,6 +844,52 @@ class TeamPage(QWidget):
         today = QDate.currentDate()
         days_to = today.daysTo(due)
         return 1 if days_to <= 2 else 0
+
+    def _team_session_key(self, team_id, task_id):
+        return f"team:{team_id}:{task_id}"
+
+    def _load_focus_minutes(self, tasks):
+        if not self.current_team_id:
+            return {}
+        if not tasks:
+            return {}
+        keys = []
+        task_ids = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            t_id = t.get("id")
+            if t_id is None:
+                continue
+            keys.append(self._team_session_key(self.current_team_id, t_id))
+            task_ids.append(t_id)
+        if not keys:
+            return {}
+
+        conn = None
+        rows = []
+        try:
+            conn = get_db_connection()
+            placeholders = ",".join("?" for _ in keys)
+            rows = conn.execute(
+                f"SELECT task_id, COALESCE(SUM(duration_min), 0) "
+                f"FROM pomodoro_sessions "
+                f"WHERE task_id IN ({placeholders}) AND status IN ('completed', 'stopped') "
+                f"GROUP BY task_id",
+                tuple(keys),
+            ).fetchall()
+        except Exception:
+            rows = []
+        finally:
+            if conn:
+                conn.close()
+
+        minutes_by_key = {row[0]: int(row[1] or 0) for row in rows}
+        focus_map = {}
+        for idx, t_id in enumerate(task_ids):
+            key = keys[idx]
+            focus_map[t_id] = minutes_by_key.get(key, 0)
+        return focus_map
 
     def _prompt_text(self, title, placeholder):
         dlg = QDialog(self)

@@ -4,7 +4,7 @@ import secrets
 import hashlib
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from pydantic import BaseModel
 from typing import Optional
 
@@ -101,6 +101,15 @@ def _init_db():
             started_by INTEGER,
             updated_at TEXT,
             ended_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS team_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     # Migrate existing installations
@@ -236,6 +245,10 @@ class PomodoroStartPayload(BaseModel):
     duration_min: int
 
 
+class TeamMessagePayload(BaseModel):
+    message: str
+
+
 @app.get("/")
 def root():
     return {"status": "ok"}
@@ -367,6 +380,23 @@ def get_team(team_id: int, authorization: Optional[str] = Header(default=None, a
     if role == "owner" or team["owner_id"] == user["id"]:
         data["join_code"] = team["join_code"]
     return data
+
+
+@app.get("/teams/{team_id}/members")
+def list_team_members(team_id: int, authorization: Optional[str] = Header(default=None, alias="Authorization")):
+    user = _require_user(authorization)
+    conn = _get_db()
+    _ensure_member(conn, team_id, user["id"])
+    rows = conn.execute(
+        """SELECT users.id as user_id, users.username, team_members.role
+           FROM team_members
+           JOIN users ON users.id = team_members.user_id
+           WHERE team_members.team_id = ?
+           ORDER BY users.username""",
+        (team_id,)
+    ).fetchall()
+    conn.close()
+    return {"members": [dict(row) for row in rows]}
 
 
 @app.get("/teams/{team_id}/tasks")
@@ -529,6 +559,67 @@ def get_pomodoro_state(team_id: int, authorization: Optional[str] = Header(defau
         "remaining_seconds": remaining_seconds,
         "server_time": _iso(now),
     }
+
+
+@app.get("/teams/{team_id}/messages")
+def list_team_messages(
+    team_id: int,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    limit: int = Query(default=50, ge=1, le=200),
+    before_id: Optional[int] = Query(default=None, ge=1),
+):
+    user = _require_user(authorization)
+    conn = _get_db()
+    _ensure_member(conn, team_id, user["id"])
+    params = [team_id]
+    where = "WHERE team_messages.team_id = ?"
+    if before_id is not None:
+        where += " AND team_messages.id < ?"
+        params.append(before_id)
+    params.append(limit)
+    rows = conn.execute(
+        f"""SELECT team_messages.id, team_messages.message, team_messages.created_at,
+                   users.id as user_id, users.username
+            FROM team_messages
+            JOIN users ON users.id = team_messages.user_id
+            {where}
+            ORDER BY team_messages.id DESC
+            LIMIT ?""",
+        tuple(params)
+    ).fetchall()
+    conn.close()
+    messages = [dict(row) for row in rows]
+    messages.reverse()
+    return {"messages": messages}
+
+
+@app.post("/teams/{team_id}/messages")
+def send_team_message(team_id: int, payload: TeamMessagePayload, authorization: Optional[str] = Header(default=None, alias="Authorization")):
+    user = _require_user(authorization)
+    msg = (payload.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    if len(msg) > 1000:
+        raise HTTPException(status_code=400, detail="Message is too long.")
+    conn = _get_db()
+    _ensure_member(conn, team_id, user["id"])
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO team_messages (team_id, user_id, message) VALUES (?, ?, ?)",
+        (team_id, user["id"], msg)
+    )
+    msg_id = cur.lastrowid
+    row = conn.execute(
+        """SELECT team_messages.id, team_messages.message, team_messages.created_at,
+                  users.id as user_id, users.username
+           FROM team_messages
+           JOIN users ON users.id = team_messages.user_id
+           WHERE team_messages.id = ?""",
+        (msg_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return {"message": dict(row) if row else None}
 
 
 @app.post("/teams/{team_id}/pomodoro/start")

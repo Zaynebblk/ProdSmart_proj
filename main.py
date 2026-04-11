@@ -4,13 +4,18 @@ import json
 import ctypes
 import traceback
 import signal
+import threading
 import time
 import re
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
-                             QVBoxLayout, QPushButton, QStackedWidget, QFrame, QLabel, QSizePolicy)
-from PyQt6.QtCore import Qt, QObject, QEvent, qInstallMessageHandler
+                             QVBoxLayout, QPushButton, QStackedWidget, QFrame, QLabel, QSizePolicy, QMessageBox)
+from PyQt6.QtCore import Qt, QObject, QEvent, qInstallMessageHandler, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap, QFontMetrics
 from resources.theme import get_theme, FONT_FAMILY, rgba
+from resources.api_client import clear_token
+from resources.api_client import check_server_http
+
+SERVER_CHECK_TIMEOUT = 1.0
 
 _LAST_QSS_INFO = None
 
@@ -233,6 +238,7 @@ except ImportError as e:
     sys.exit(1)
 
 class MainApp(QMainWindow):
+    server_health_checked = pyqtSignal(bool)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ProdSmart")
@@ -322,6 +328,7 @@ class MainApp(QMainWindow):
         self.btn_teams = QPushButton("Teams")
         self.btn_history = QPushButton("History")
         self.btn_settings = QPushButton("Settings")
+        self.btn_sign_out = QPushButton("Sign Out")
 
         self.nav_buttons = [ self.btn_tasks,
             self.btn_dashboard,
@@ -336,6 +343,9 @@ class MainApp(QMainWindow):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("nav", True)
 
+        self.btn_sign_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sign_out.setProperty("nav", True)
+
         for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history]:
             sidebar_l.addWidget(btn)
 
@@ -346,6 +356,7 @@ class MainApp(QMainWindow):
         sidebar_l.addWidget(sep_bottom)
 
         sidebar_l.addWidget(self.btn_settings)
+        sidebar_l.addWidget(self.btn_sign_out)
 
         sidebar_l.addStretch()
         self.main_layout.addWidget(self.sidebar)
@@ -390,15 +401,30 @@ class MainApp(QMainWindow):
         if app:
             app.installEventFilter(self._transient_blocker)
 
+        # Server health watcher
+        self._server_watch_timer = QTimer(self)
+        self._server_watch_timer.setInterval(200)
+        self._server_watch_timer.timeout.connect(self._check_server_health)
+        self._server_down_alerted = False
+        self._server_is_running = None
+        self._server_check_inflight = False
+        self._server_check_started_at = 0.0
+        self._page_switch_guard = False
+        self.server_health_checked.connect(self._handle_server_health_result)
+        # Keep the global server watcher active even on the login page
+        self._server_watch_timer.start()
+        self._check_server_health()
+
         # 3. BUTTON CONNECTIONS
         self.btn_tasks.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
         self.btn_dashboard.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
         
         self.btn_matrix.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
         self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
-        self.btn_teams.clicked.connect(lambda: self.content_stack.setCurrentIndex(9))
+        self.btn_teams.clicked.connect(self._open_teams_guarded)
         self.btn_history.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
         self.btn_settings.clicked.connect(lambda: self.content_stack.setCurrentIndex(6))
+        self.btn_sign_out.clicked.connect(self.sign_out)
 
         # Monitor Page Changes to Auto-Refresh Data
         self.content_stack.currentChanged.connect(self.on_page_changed)
@@ -455,6 +481,8 @@ class MainApp(QMainWindow):
         # Connection 10: Team Tasks -> Team Pomodoro
         if hasattr(self.page_team, 'team_pomodoro_requested'):
             self.page_team.team_pomodoro_requested.connect(self.open_pomodoro_for_team)
+        if hasattr(self.page_team, 'team_task_pomodoro_requested'):
+            self.page_team.team_task_pomodoro_requested.connect(self.open_pomodoro_for_team_task)
 
         # 5. INITIAL LOAD
         self.apply_settings()
@@ -465,11 +493,140 @@ class MainApp(QMainWindow):
         """Handle successful login - switch to main app"""
         # Store user_id for the session
         self.current_user_id = user_id
+        self._server_is_running = True
+        self._server_down_alerted = False
         # Show sidebar
         self.sidebar.show()
         # Switch to tasks page (index 1)
         self.content_stack.setCurrentIndex(1)
         self._set_active_nav(self.btn_tasks)
+        self._start_server_watch()
+
+    def sign_out(self):
+        try:
+            clear_token()
+        except Exception:
+            pass
+        try:
+            self.current_user_id = None
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "page_team") and hasattr(self.page_team, "pause_network"):
+                self.page_team.pause_network()
+        except Exception:
+            pass
+        self.sidebar.hide()
+        if hasattr(self, "page_login") and hasattr(self.page_login, "show_login_page"):
+            try:
+                self.page_login.show_login_page()
+            except Exception:
+                pass
+        if hasattr(self, "page_login") and hasattr(self.page_login, "start_server_status_timer"):
+            try:
+                self.page_login.start_server_status_timer()
+            except Exception:
+                pass
+        if hasattr(self, "page_login") and hasattr(self.page_login, "force_server_status_refresh"):
+            try:
+                self.page_login.force_server_status_refresh()
+            except Exception:
+                pass
+        self.content_stack.setCurrentIndex(0)
+
+    def _start_server_watch(self):
+        if hasattr(self, "_server_watch_timer") and not self._server_watch_timer.isActive():
+            self._server_watch_timer.start()
+        self._check_server_health()
+
+    def _check_server_health(self):
+        if getattr(self, "_server_check_inflight", False):
+            started_at = getattr(self, "_server_check_started_at", 0.0)
+            if started_at and (time.monotonic() - started_at) < 2.0:
+                return
+            self._server_check_inflight = False
+
+        server_url = ""
+        try:
+            if hasattr(self, "page_login") and hasattr(self.page_login, "server_input"):
+                server_url = self.page_login.server_input.text().strip()
+        except Exception:
+            server_url = ""
+
+        self._server_check_inflight = True
+        self._server_check_started_at = time.monotonic()
+
+        def _worker(url):
+            try:
+                is_up = check_server_http(url or None, timeout=SERVER_CHECK_TIMEOUT)
+            except Exception:
+                is_up = False
+            self.server_health_checked.emit(is_up)
+
+        threading.Thread(target=_worker, args=(server_url,), daemon=True).start()
+
+    def _handle_server_health_result(self, is_up):
+        self._server_check_inflight = False
+        self._server_check_started_at = 0.0
+        self._server_is_running = bool(is_up)
+        # Keep login page status label in sync even while logged in.
+        try:
+            if hasattr(self, "page_login"):
+                if hasattr(self.page_login, "set_server_state"):
+                    self.page_login.set_server_state(is_up)
+                elif hasattr(self.page_login, "server_status"):
+                    self.page_login.server_status.setText("Server: running" if is_up else "Server: not running")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "btn_teams"):
+                self.btn_teams.setEnabled(bool(is_up))
+        except Exception:
+            pass
+        if not is_up:
+            try:
+                if hasattr(self, "page_team") and hasattr(self.page_team, "pause_network"):
+                    self.page_team.pause_network()
+            except Exception:
+                pass
+        if is_up:
+            self._server_down_alerted = False
+            return
+        self._warn_server_down()
+        self._redirect_from_team_if_needed()
+
+    def _warn_server_down(self):
+        if hasattr(self, "sidebar") and not self.sidebar.isVisible():
+            return
+        if getattr(self, "_server_down_alerted", False):
+            return
+        self._server_down_alerted = True
+        QMessageBox.warning(self, "Server", "Server stopped or it's not running.")
+
+    def _redirect_from_team_if_needed(self):
+        if not hasattr(self, "content_stack"):
+            return
+        if self.content_stack.currentIndex() != 9:
+            return
+        if getattr(self, "_page_switch_guard", False):
+            return
+        self._page_switch_guard = True
+        try:
+            target = 1 if self.sidebar.isVisible() else 0
+            self.content_stack.setCurrentIndex(target)
+            if target == 1:
+                self._set_active_nav(self.btn_tasks)
+            else:
+                self._set_active_nav(None)
+        finally:
+            self._page_switch_guard = False
+
+    def _open_teams_guarded(self):
+        if not bool(getattr(self, "_server_is_running", False)):
+            self._check_server_health()
+            self._warn_server_down()
+            return
+        self.content_stack.setCurrentIndex(9)
 
     def on_page_changed(self, index):
         """Auto-refresh data when clicking on a tab"""
@@ -500,6 +657,10 @@ class MainApp(QMainWindow):
         elif index == 8:  # Quick Stats
             self._set_active_nav(self.btn_history)
         elif index == 9:  # Teams
+            if not bool(getattr(self, "_server_is_running", False)):
+                self._warn_server_down()
+                self._redirect_from_team_if_needed()
+                return
             if hasattr(self.page_team, "refresh_teams"):
                 self.page_team.refresh_teams()
             self._set_active_nav(self.btn_teams)
@@ -507,12 +668,28 @@ class MainApp(QMainWindow):
     def open_pomodoro_for_task(self, t_id, title, priority=None, task_type=None):
         if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
             self.page_pomodoro.set_task(t_id, title, priority, task_type)
-        self.content_stack.setCurrentIndex(3)
+        self.content_stack.setCurrentIndex(4)
         self._set_active_nav(self.btn_pomodoro)
 
     def open_tasks_from_pomodoro(self):
-        self.content_stack.setCurrentIndex(0)
-        self._set_active_nav(self.btn_tasks)
+        box = QMessageBox(self)
+        box.setWindowTitle("Select Task Source")
+        box.setText("Choose which task list you want to pick from.")
+        solo_btn = box.addButton("Solo Tasks", QMessageBox.ButtonRole.AcceptRole)
+        team_btn = box.addButton("Team Tasks", QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(solo_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == team_btn:
+            self._open_teams_guarded()
+            return
+        if clicked == solo_btn:
+            self.content_stack.setCurrentIndex(1)
+            self._set_active_nav(self.btn_tasks)
+            return
+        # Cancel: do nothing
 
     def open_dashboard_from_history(self):
         self.content_stack.setCurrentIndex(1)
@@ -521,7 +698,7 @@ class MainApp(QMainWindow):
     def handle_dashboard_action(self, action_text):
         action = (action_text or "").strip().lower()
         if action in ("start a pomodoro", "plan recovery"):
-            self.content_stack.setCurrentIndex(3)
+            self.content_stack.setCurrentIndex(4)
             self._set_active_nav(self.btn_pomodoro)
             if action == "plan recovery":
                 if hasattr(self.page_pomodoro, "prepare_recovery_break"):
@@ -569,6 +746,12 @@ class MainApp(QMainWindow):
                 self.page_pomodoro.activate_team_mode(team_id, start_now)
             except Exception:
                 pass
+
+    def open_pomodoro_for_team_task(self, session_key, title, priority=None, task_type=None):
+        if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
+            self.page_pomodoro.set_task(session_key, title, priority, task_type)
+        self.content_stack.setCurrentIndex(4)
+        self._set_active_nav(self.btn_pomodoro)
 
     def _set_active_nav(self, active_btn):
         if not hasattr(self, "nav_buttons"):
@@ -810,6 +993,46 @@ class MainApp(QMainWindow):
                 border: 1px solid {c['border']};
                 border-radius: 20px;
             }}
+            QFrame#RememberedCard {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+            QLabel#RememberedTitle {{
+                color: {c['text']};
+                font-weight: 800;
+                font-size: 14px;
+            }}
+            QLabel#RememberedEmpty {{
+                color: {c['sub']};
+                font-size: 11px;
+            }}
+            QPushButton#RememberedUserButton {{
+                background-color: {c['card_alt']};
+                border: 1px solid {c['border']};
+                border-radius: 14px;
+                padding: 8px 12px;
+                text-align: left;
+                color: {c['text']};
+                font-weight: 700;
+            }}
+            QPushButton#RememberedForgetButton {{
+                background-color: transparent;
+                border: 1px solid {c['border']};
+                border-radius: 14px;
+                padding: 8px 12px;
+                color: {c['sub']};
+                font-weight: 700;
+            }}
+            QPushButton#RememberedForgetButton:hover {{
+                background-color: {c['accent_soft']};
+                border-color: {c['accent']};
+                color: {c['accent']};
+            }}
+            QPushButton#RememberedUserButton:hover {{
+                background-color: {c['accent_soft']};
+                border-color: {c['accent']};
+            }}
             QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
             QLabel#FieldIcon {{ color: {c['sub']}; }}
             QLabel#SectionTitle {{
@@ -933,6 +1156,46 @@ class MainApp(QMainWindow):
                 background-color: {c['card']};
                 border: 1px solid {c['border']};
                 border-radius: 20px;
+            }}
+            QFrame#RememberedCard {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+            QLabel#RememberedTitle {{
+                color: {c['text']};
+                font-weight: 800;
+                font-size: 14px;
+            }}
+            QLabel#RememberedEmpty {{
+                color: {c['sub']};
+                font-size: 11px;
+            }}
+            QPushButton#RememberedUserButton {{
+                background-color: {c['card_alt']};
+                border: 1px solid {c['border']};
+                border-radius: 14px;
+                padding: 8px 12px;
+                text-align: left;
+                color: {c['text']};
+                font-weight: 700;
+            }}
+            QPushButton#RememberedForgetButton {{
+                background-color: transparent;
+                border: 1px solid {c['border']};
+                border-radius: 14px;
+                padding: 8px 12px;
+                color: {c['sub']};
+                font-weight: 700;
+            }}
+            QPushButton#RememberedForgetButton:hover {{
+                background-color: {c['card_alt']};
+                border-color: {c['accent']};
+                color: {c['accent']};
+            }}
+            QPushButton#RememberedUserButton:hover {{
+                background-color: {c['card_alt']};
+                border-color: {c['accent']};
             }}
             QLabel#FieldLabel {{ color: {c['text']}; margin-bottom: 4px; }}
             QLabel#FieldIcon {{ color: {c['sub']}; }}

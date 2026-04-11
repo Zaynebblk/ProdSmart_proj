@@ -17,7 +17,12 @@
         "Uncategorized"
     ],
     "cloud_base_url": "http://127.0.0.1:8000",
-    "cloud_token": "i90dqVQHi0ye3Mbfqk0miYiRllEw5sFfckN-E4PnFK0",
-    "cloud_user_id": 1,
-    "cloud_username": "test"
+    "remember_me": true,
+    "remembered_accounts": [
+        {
+            "username": "test",
+            "token": "W0cfyx1Ga5GjVDISHQV94-zNktZZgwr9cNbfBjB93vU",
+            "user_id": 1
+        }
+    ]
 }

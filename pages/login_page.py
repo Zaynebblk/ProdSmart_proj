@@ -1,23 +1,31 @@
 import os
 import sys
 import subprocess
+import time
+import threading
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFrame, QMessageBox, QCheckBox, QGraphicsDropShadowEffect,
     QStackedLayout, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt6.QtGui import QFont, QPainter, QColor, QLinearGradient, QPixmap, QIcon
 from resources.api_client import (
     ApiError,
     api_login,
+    api_me,
     api_register,
-    api_ping,
+    check_server_http,
     get_base_url,
     set_base_url,
+    set_token,
+    load_settings,
+    save_settings,
 )
 from resources.theme import get_theme, FONT_FAMILY, rgba
+
+SERVER_CHECK_TIMEOUT = 1.0
 
 class AnimatedButton(QPushButton):
     """A custom button with hover animations and modern styling"""
@@ -238,6 +246,8 @@ class CreateAccountPage(QWidget):
 
 class LoginPage(QWidget):
     login_successful = pyqtSignal(int)  # Signal emitted with user_id when login succeeds
+    server_status_checked = pyqtSignal(bool)
+    server_status_scheduled = pyqtSignal(bool, int)
 
     def __init__(self):
         super().__init__()
@@ -352,6 +362,11 @@ class LoginPage(QWidget):
         password_block, self.password_input = field_block("Password", "Enter your password", is_password=True)
         form_layout.addLayout(password_block)
 
+        self.show_password_checkbox = QCheckBox("Show password")
+        self.show_password_checkbox.setObjectName("LoginCheckbox")
+        self.show_password_checkbox.toggled.connect(self._toggle_password_visibility)
+        form_layout.addWidget(self.show_password_checkbox)
+
         server_block = QVBoxLayout()
         server_block.setSpacing(8)
         server_block.addLayout(section_header("Server URL"))
@@ -387,6 +402,7 @@ class LoginPage(QWidget):
         # Remember me checkbox with better styling
         self.remember_checkbox = QCheckBox("Remember me")
         self.remember_checkbox.setObjectName("LoginCheckbox")
+        self.remember_checkbox.stateChanged.connect(self._on_remember_toggled)
         form_layout.addWidget(self.remember_checkbox)
 
         # Buttons layout with modern buttons
@@ -407,7 +423,32 @@ class LoginPage(QWidget):
 
         form_layout.addLayout(buttons_layout)
 
-        login_wrapper.addWidget(form_card, alignment=Qt.AlignmentFlag.AlignCenter)
+        # Remembered accounts card (separate block)
+        self.remembered_card = QFrame()
+        self.remembered_card.setObjectName("RememberedCard")
+        self.remembered_card.setFixedWidth(320)
+        remembered_card_layout = QVBoxLayout(self.remembered_card)
+        remembered_card_layout.setContentsMargins(24, 24, 24, 24)
+        remembered_card_layout.setSpacing(12)
+
+        remembered_title = QLabel("Remembered Accounts")
+        remembered_title.setObjectName("RememberedTitle")
+        remembered_card_layout.addWidget(remembered_title)
+
+        self.remembered_container = QWidget()
+        self.remembered_container.setObjectName("RememberedContainer")
+        self.remembered_layout = QVBoxLayout(self.remembered_container)
+        self.remembered_layout.setContentsMargins(0, 0, 0, 0)
+        self.remembered_layout.setSpacing(8)
+        remembered_card_layout.addWidget(self.remembered_container)
+        remembered_card_layout.addStretch()
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(22)
+        cards_row.addWidget(form_card)
+        cards_row.addWidget(self.remembered_card)
+
+        login_wrapper.addLayout(cards_row)
         login_wrapper.addStretch()
 
         self.register_view = CreateAccountPage()
@@ -424,12 +465,314 @@ class LoginPage(QWidget):
         self.password_input.returnPressed.connect(self.handle_login)
         self.server_input.returnPressed.connect(self.handle_login)
 
+        # Initialize status + remembered user
+        self._last_server_url = None
+        self._server_status_inflight = False
+        self._server_status_started_at = 0.0
+        self._server_is_running = None
+        self.server_status_checked.connect(self._handle_server_status_result)
+        self.server_status_scheduled.connect(self._handle_scheduled_check_result)
+        self._load_remembered_user()
+        self._refresh_server_status()
+        self._server_status_timer = QTimer(self)
+        self._server_status_timer.setInterval(1000)
+        self._server_status_timer.timeout.connect(self._refresh_server_status)
+        self._server_status_timer.start()
+
+    def _toggle_password_visibility(self, show):
+        if not hasattr(self, "password_input"):
+            return
+        mode = QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        self.password_input.setEchoMode(mode)
+
+    def start_server_status_timer(self):
+        if hasattr(self, "_server_status_timer"):
+            self._server_status_timer.start()
+
+    def stop_server_status_timer(self):
+        if hasattr(self, "_server_status_timer") and self._server_status_timer.isActive():
+            self._server_status_timer.stop()
+
     def update_theme(self, theme_name):
         """Update the theme of the login page"""
         self.current_theme = theme_name
         if hasattr(self, "register_view"):
             self.register_view.update_theme(theme_name)
+        try:
+            self._render_remembered_users(getattr(self, "_remembered_accounts_cache", []))
+        except Exception:
+            pass
         self.update()  # Trigger repaint for gradient background
+
+    def _apply_server_state(self, is_up):
+        self._server_is_running = bool(is_up)
+        if hasattr(self, "server_status"):
+            self.server_status.setText("Server: running" if is_up else "Server: not running")
+        if hasattr(self, "login_button"):
+            self.login_button.setEnabled(bool(is_up))
+
+    def set_server_state(self, is_up):
+        self._apply_server_state(bool(is_up))
+
+    def is_server_running(self):
+        return bool(self._server_is_running)
+
+    def _warn_server_down(self):
+        QMessageBox.warning(self, "Server", "Server stopped or it's not running.")
+
+    def _refresh_server_status(self):
+        self._sync_server_url()
+        if getattr(self, "_server_status_inflight", False):
+            started_at = getattr(self, "_server_status_started_at", 0.0)
+            if started_at and (time.monotonic() - started_at) < 2.0:
+                return
+            # Reset stuck inflight checks
+            self._server_status_inflight = False
+        server_url = ""
+        if hasattr(self, "server_input"):
+            server_url = self.server_input.text().strip()
+        if not server_url:
+            server_url = get_base_url()
+        self._server_status_inflight = True
+        self._server_status_started_at = time.monotonic()
+
+        def _worker(url):
+            try:
+                is_up = check_server_http(url, timeout=SERVER_CHECK_TIMEOUT)
+            except Exception:
+                is_up = False
+            self.server_status_checked.emit(is_up)
+
+        threading.Thread(target=_worker, args=(server_url,), daemon=True).start()
+
+    def _handle_server_status_result(self, is_up):
+        self._server_status_inflight = False
+        self._server_status_started_at = 0.0
+        self._apply_server_state(is_up)
+
+    def _schedule_server_status_check(self, attempts=10):
+        if attempts <= 0:
+            return
+        def _try():
+            self._sync_server_url()
+            server_url = ""
+            if hasattr(self, "server_input"):
+                server_url = self.server_input.text().strip()
+            if not server_url:
+                server_url = get_base_url()
+
+            def _worker(url, remaining):
+                try:
+                    is_up = check_server_http(url, timeout=SERVER_CHECK_TIMEOUT)
+                except Exception:
+                    is_up = False
+                self.server_status_scheduled.emit(is_up, remaining)
+
+            threading.Thread(target=_worker, args=(server_url, attempts), daemon=True).start()
+
+        QTimer.singleShot(800, _try)
+
+    def _handle_scheduled_check_result(self, is_up, remaining):
+        self._apply_server_state(is_up)
+        if is_up:
+            return
+        if remaining <= 1:
+            return
+        self._schedule_server_status_check(remaining - 1)
+
+    def _sync_server_url(self):
+        if not hasattr(self, "server_input"):
+            return
+        target = (self.server_input.text().strip() or get_base_url()).strip()
+        if not target:
+            return
+        try:
+            current = get_base_url()
+        except Exception:
+            current = ""
+        if target == self._last_server_url and current == target:
+            return
+        self._last_server_url = target
+        if current != target:
+            try:
+                set_base_url(target)
+            except Exception:
+                pass
+
+    def _remembered_accounts(self):
+        try:
+            data = load_settings()
+        except Exception:
+            return []
+        accounts = data.get("remembered_accounts")
+        result = []
+        if isinstance(accounts, list):
+            for item in accounts:
+                if not isinstance(item, dict):
+                    continue
+                username = str(item.get("username") or "").strip()
+                if not username:
+                    continue
+                token = str(item.get("token") or "").strip() or None
+                user_id = item.get("user_id")
+                result.append({"username": username, "token": token, "user_id": user_id})
+        usernames = data.get("remembered_usernames")
+        if isinstance(usernames, list):
+            for item in usernames:
+                name = str(item).strip()
+                if not name:
+                    continue
+                if not any(acc["username"] == name for acc in result):
+                    result.append({"username": name, "token": None, "user_id": None})
+        legacy = (data.get("remembered_username") or "").strip()
+        if legacy and not any(acc["username"] == legacy for acc in result):
+            result.append({"username": legacy, "token": None, "user_id": None})
+        return result
+
+    def _save_remembered_accounts(self, accounts):
+        try:
+            data = load_settings()
+        except Exception:
+            data = {}
+        clean = []
+        seen = set()
+        for item in accounts:
+            username = str(item.get("username") or "").strip()
+            if not username or username in seen:
+                continue
+            seen.add(username)
+            clean.append({
+                "username": username,
+                "token": item.get("token"),
+                "user_id": item.get("user_id"),
+            })
+        data["remembered_accounts"] = clean
+        data.pop("remembered_username", None)
+        data.pop("remembered_usernames", None)
+        try:
+            save_settings(data)
+        except Exception:
+            pass
+
+    def _load_remembered_user(self):
+        self._remembered_accounts_cache = self._remembered_accounts()
+        self._render_remembered_users(self._remembered_accounts_cache)
+        # Always start unchecked per requirement
+        self.remember_checkbox.setChecked(False)
+
+    def _on_remember_toggled(self, state):
+        try:
+            data = load_settings()
+        except Exception:
+            data = {}
+        data["remember_me"] = bool(state)
+        try:
+            save_settings(data)
+        except Exception:
+            pass
+
+    def _render_remembered_users(self, accounts):
+        if not hasattr(self, "remembered_layout"):
+            return
+        while self.remembered_layout.count():
+            item = self.remembered_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        if not accounts:
+            empty = QLabel("No remembered accounts yet.")
+            empty.setObjectName("RememberedEmpty")
+            self.remembered_layout.addWidget(empty)
+            return
+        self._remembered_accounts_cache = list(accounts)
+        for account in accounts:
+            username = account.get("username")
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            user_btn = QPushButton()
+            user_btn.setObjectName("RememberedUserButton")
+            user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            user_btn.setFixedHeight(44)
+            user_btn.setText(f"  {username}")
+            user_btn.clicked.connect(lambda _, u=username: self._use_remembered_user(u))
+            self._set_user_button_icon(user_btn, username)
+            row_layout.addWidget(user_btn, 1)
+
+            forget_btn = QPushButton("Forget")
+            forget_btn.setObjectName("RememberedForgetButton")
+            forget_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            forget_btn.setFixedHeight(44)
+            forget_btn.clicked.connect(lambda _, u=username: self._forget_remembered_user(u))
+            row_layout.addWidget(forget_btn)
+
+            self.remembered_layout.addWidget(row)
+
+    def _set_user_button_icon(self, button, username):
+        theme = get_theme(self.current_theme if hasattr(self, "current_theme") else "Dark")
+        initials = (str(username)[:1] or "U").upper()
+        size = 26
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor(theme["accent"])
+        fg = QColor(theme["bg"])
+        painter.setBrush(bg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, size, size)
+        painter.setPen(fg)
+        font = QFont(FONT_FAMILY, 10, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, initials)
+        painter.end()
+        button.setIcon(QIcon(pix))
+        button.setIconSize(pix.size())
+
+    def _forget_remembered_user(self, username):
+        current = [acc for acc in self._remembered_accounts() if acc.get("username") != username]
+        self._save_remembered_accounts(current)
+        self._render_remembered_users(current)
+
+    def _use_remembered_user(self, username):
+        if not username:
+            return
+        token = None
+        user_id = None
+        for acc in self._remembered_accounts():
+            if acc.get("username") == username:
+                token = acc.get("token")
+                user_id = acc.get("user_id")
+                break
+        server_url = self.server_input.text().strip() or get_base_url()
+        try:
+            set_base_url(server_url)
+        except Exception:
+            pass
+        if not check_server_http(server_url, timeout=SERVER_CHECK_TIMEOUT):
+            self._warn_server_down()
+            return
+        self.username_input.setText(username)
+        if token:
+            try:
+                set_token(token, user_id=user_id, username=username)
+            except Exception:
+                pass
+            try:
+                res = api_me()
+                srv_id = res.get("user_id") if isinstance(res, dict) else None
+                server_username = (res.get("username") or "").strip() if isinstance(res, dict) else ""
+                if srv_id and server_username.lower() == str(username).strip().lower():
+                    self.user_id = srv_id
+                    self.login_successful.emit(srv_id)
+                    return
+            except ApiError:
+                pass
+            except Exception:
+                pass
+        self.password_input.setFocus()
 
     def _is_local_url(self, url):
         try:
@@ -457,18 +800,12 @@ class LoginPage(QWidget):
         except Exception:
             pass
 
-        try:
-            api_ping()
-            if hasattr(self, "server_status"):
-                self.server_status.setText("Server: running")
+        if check_server_http(server_url, timeout=SERVER_CHECK_TIMEOUT):
+            self._apply_server_state(True)
             QMessageBox.information(self, "Server", "Server is already running.")
             return
-        except ApiError:
-            pass
-        except Exception:
-            # Timeout or network error: treat as not running and try starting locally.
-            if hasattr(self, "server_status"):
-                self.server_status.setText("Server: not reachable")
+        else:
+            self._apply_server_state(False)
 
         server_path = os.path.join(os.getcwd(), "server", "main.py")
         if not os.path.exists(server_path):
@@ -493,6 +830,7 @@ class LoginPage(QWidget):
             if hasattr(self, "server_status"):
                 self.server_status.setText("Server: starting...")
             QMessageBox.information(self, "Server", "Server started. Try login again in a few seconds.")
+            self._schedule_server_status_check()
         except Exception as e:
             QMessageBox.warning(self, "Server", f"Could not start server: {e}")
 
@@ -522,18 +860,42 @@ class LoginPage(QWidget):
         if not username or not password:
             QMessageBox.warning(self, "Login Error", "Please enter both username and password.")
             return
+        if self._server_is_running is False:
+            self._warn_server_down()
+            return
 
         try:
             set_base_url(server_url)
+            if not check_server_http(server_url, timeout=SERVER_CHECK_TIMEOUT):
+                self._warn_server_down()
+                return
             res = api_login(username, password)
             user_id = res.get("user_id") if isinstance(res, dict) else None
             if user_id:
+                if self.remember_checkbox.isChecked():
+                    accounts = self._remembered_accounts()
+                    token = res.get("token") if isinstance(res, dict) else None
+                    updated = False
+                    for acc in accounts:
+                        if acc.get("username") == username:
+                            acc["token"] = token
+                            acc["user_id"] = user_id
+                            updated = True
+                            break
+                    if not updated:
+                        accounts.append({"username": username, "token": token, "user_id": user_id})
+                    self._save_remembered_accounts(accounts)
+                    self._render_remembered_users(accounts)
                 self.user_id = user_id
                 self.login_successful.emit(user_id)
                 return
             QMessageBox.warning(self, "Login Failed", "Invalid username or password.")
         except ApiError as e:
-            QMessageBox.warning(self, "Login Failed", str(e))
+            message = str(e)
+            if "Network error" in message or "timed out" in message:
+                self._warn_server_down()
+            else:
+                QMessageBox.warning(self, "Login Failed", message)
 
     def handle_register(self):
         self.show_registration_page()
@@ -545,6 +907,24 @@ class LoginPage(QWidget):
         self.stack.setCurrentWidget(self.login_view)
         self.username_input.clear()
         self.password_input.clear()
+        try:
+            self.force_server_status_refresh()
+        except Exception:
+            pass
+
+    def force_server_status_refresh(self):
+        try:
+            self._server_status_inflight = False
+        except Exception:
+            pass
+        try:
+            self._server_status_started_at = 0.0
+        except Exception:
+            pass
+        try:
+            self._refresh_server_status()
+        except Exception:
+            pass
 
     def on_registration_success(self):
         QMessageBox.information(self, "Success", "Account created successfully! You can now log in.")
