@@ -233,6 +233,7 @@ try:
     from pages.quick_stats_page import QuickStatsPage
     from pages.login_page import LoginPage
     from pages.team_page import TeamPage
+    from pages.user_page import UserProfilePage
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -327,6 +328,7 @@ class MainApp(QMainWindow):
         self.btn_pomodoro = QPushButton("Pomodoro")
         self.btn_teams = QPushButton("Teams")
         self.btn_history = QPushButton("History")
+        self.btn_profile = QPushButton("👤 My Profile")
         self.btn_settings = QPushButton("Settings")
         self.btn_sign_out = QPushButton("Sign Out")
 
@@ -336,6 +338,7 @@ class MainApp(QMainWindow):
             self.btn_pomodoro,
             self.btn_teams,
             self.btn_history,
+            self.btn_profile,
             self.btn_settings
         ]
         
@@ -346,7 +349,7 @@ class MainApp(QMainWindow):
         self.btn_sign_out.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_sign_out.setProperty("nav", True)
 
-        for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history]:
+        for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history, self.btn_profile]:
             sidebar_l.addWidget(btn)
 
         sep_bottom = QFrame()
@@ -380,6 +383,7 @@ class MainApp(QMainWindow):
         self.page_quick_stats = QuickStatsPage()
         self.page_settings = SettingsPage()
         self.page_team = TeamPage()
+        self.page_profile = UserProfilePage()
         
         self.content_stack.addWidget(self.page_login)      # Index 0
         self.content_stack.addWidget(self.page_tasks)      # Index 1
@@ -391,6 +395,7 @@ class MainApp(QMainWindow):
         self.content_stack.addWidget(self.page_report)     # Index 7
         self.content_stack.addWidget(self.page_quick_stats) # Index 8
         self.content_stack.addWidget(self.page_team)       # Index 9
+        self.content_stack.addWidget(self.page_profile)    # Index 10
 
         self.main_layout.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(self.central_widget)
@@ -423,6 +428,7 @@ class MainApp(QMainWindow):
         self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
         self.btn_teams.clicked.connect(self._open_teams_guarded)
         self.btn_history.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
+        self.btn_profile.clicked.connect(lambda: self.content_stack.setCurrentIndex(10))
         self.btn_settings.clicked.connect(lambda: self.content_stack.setCurrentIndex(6))
         self.btn_sign_out.clicked.connect(self.sign_out)
 
@@ -495,6 +501,14 @@ class MainApp(QMainWindow):
         self.current_user_id = user_id
         self._server_is_running = True
         self._server_down_alerted = False
+        
+        # Set user info on profile page
+        try:
+            username = self.page_login.username_input.text().strip() or "User"
+            self.page_profile.set_user_info(username, user_id)
+        except Exception:
+            pass
+        
         # Show sidebar
         self.sidebar.show()
         # Switch to tasks page (index 1)

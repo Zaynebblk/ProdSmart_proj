@@ -20,9 +20,14 @@
     "remember_me": true,
     "remembered_accounts": [
         {
-            "username": "test",
-            "token": "W0cfyx1Ga5GjVDISHQV94-zNktZZgwr9cNbfBjB93vU",
-            "user_id": 1
+            "username": "ahmed",
+            "token": "9g_i1unHkXfPT8O1mlSkbblhU0K1JICMw6MbFW0GKxg",
+            "user_id": 5
         }
-    ]
+    ],
+    "user_bio": "",
+    "user_profile_picture": "C:\\Users\\benam\\Desktop\\p2mprodsmart\\ProdSmart_proj\\resources\\profiles\\profile_5.png",
+    "cloud_token": "9g_i1unHkXfPT8O1mlSkbblhU0K1JICMw6MbFW0GKxg",
+    "cloud_user_id": 5,
+    "cloud_username": "ahmed"
 }
