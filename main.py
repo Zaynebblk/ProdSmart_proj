@@ -14,6 +14,8 @@ from PyQt6.QtGui import QIcon, QPixmap, QFontMetrics
 from resources.theme import get_theme, FONT_FAMILY, rgba
 from resources.api_client import clear_token
 from resources.api_client import check_server_http
+from resources.api_client import api_shutdown_local_server
+from resources.server_manager import stop_managed_server
 
 SERVER_CHECK_TIMEOUT = 1.0
 
@@ -234,6 +236,7 @@ try:
     from pages.login_page import LoginPage
     from pages.team_page import TeamPage
     from pages.user_page import UserProfilePage
+    from pages.search_page import SearchPage
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
@@ -323,23 +326,26 @@ class MainApp(QMainWindow):
         # -----------------------------------------
         self.btn_tasks = QPushButton("My Tasks")
         self.btn_dashboard = QPushButton("Dashboard")
+        self.btn_search = QPushButton("Search")
         
         self.btn_matrix = QPushButton("Matrix")
         self.btn_pomodoro = QPushButton("Pomodoro")
         self.btn_teams = QPushButton("Teams")
         self.btn_history = QPushButton("History")
-        self.btn_profile = QPushButton("👤 My Profile")
+        self.btn_profile = QPushButton("My Profile")
         self.btn_settings = QPushButton("Settings")
         self.btn_sign_out = QPushButton("Sign Out")
 
-        self.nav_buttons = [ self.btn_tasks,
+        self.nav_buttons = [
+            self.btn_tasks,
             self.btn_dashboard,
+            self.btn_search,
             self.btn_matrix,
             self.btn_pomodoro,
             self.btn_teams,
             self.btn_history,
             self.btn_profile,
-            self.btn_settings
+            self.btn_settings,
         ]
         
         for btn in self.nav_buttons:
@@ -349,7 +355,7 @@ class MainApp(QMainWindow):
         self.btn_sign_out.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_sign_out.setProperty("nav", True)
 
-        for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history, self.btn_profile]:
+        for btn in [ self.btn_tasks, self.btn_dashboard, self.btn_search, self.btn_matrix, self.btn_pomodoro, self.btn_teams, self.btn_history, self.btn_profile]:
             sidebar_l.addWidget(btn)
 
         sep_bottom = QFrame()
@@ -384,6 +390,7 @@ class MainApp(QMainWindow):
         self.page_settings = SettingsPage()
         self.page_team = TeamPage()
         self.page_profile = UserProfilePage()
+        self.page_search = SearchPage()
         
         self.content_stack.addWidget(self.page_login)      # Index 0
         self.content_stack.addWidget(self.page_tasks)      # Index 1
@@ -396,6 +403,7 @@ class MainApp(QMainWindow):
         self.content_stack.addWidget(self.page_quick_stats) # Index 8
         self.content_stack.addWidget(self.page_team)       # Index 9
         self.content_stack.addWidget(self.page_profile)    # Index 10
+        self.content_stack.addWidget(self.page_search)     # Index 11
 
         self.main_layout.addWidget(self.content_stack, stretch=1)
         self.setCentralWidget(self.central_widget)
@@ -423,6 +431,7 @@ class MainApp(QMainWindow):
         # 3. BUTTON CONNECTIONS
         self.btn_tasks.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
         self.btn_dashboard.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
+        self.btn_search.clicked.connect(lambda: self.content_stack.setCurrentIndex(11))
         
         self.btn_matrix.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
         self.btn_pomodoro.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
@@ -435,6 +444,13 @@ class MainApp(QMainWindow):
         # Monitor Page Changes to Auto-Refresh Data
         self.content_stack.currentChanged.connect(self.on_page_changed)
 
+        # Global search -> open actions
+        try:
+            self.page_search.open_local_task.connect(self._open_local_task_from_search)
+            self.page_search.open_team_task.connect(self._open_team_task_from_search)
+        except Exception:
+            pass
+
         # --- 4. SIGNALS CONNECTIONS ---
         
         # Connection 0: Login -> Main App
@@ -442,6 +458,13 @@ class MainApp(QMainWindow):
         
         # Connection 1: Settings -> Apply Theme
         self.page_settings.settings_saved.connect(self.apply_settings)
+
+        # Connection 1b: Profile -> History (View All)
+        if hasattr(self, "page_profile") and hasattr(self.page_profile, "request_history"):
+            try:
+                self.page_profile.request_history.connect(lambda: self.content_stack.setCurrentIndex(5))
+            except Exception:
+                pass
 
         # Connection 2: Task Added -> Matrix Refresh
         if hasattr(self.page_tasks, 'task_added'):
@@ -642,6 +665,48 @@ class MainApp(QMainWindow):
             return
         self.content_stack.setCurrentIndex(9)
 
+    def _open_local_task_from_search(self, task_id: int):
+        try:
+            task_id = int(task_id)
+        except Exception:
+            return
+        self.content_stack.setCurrentIndex(1)
+        try:
+            self._set_active_nav(self.btn_tasks)
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(0, lambda: self.page_tasks.show_task_details(task_id))
+        except Exception:
+            pass
+
+    def _open_team_task_from_search(self, team_id: int, task_id: int):
+        if not bool(getattr(self, "_server_is_running", False)):
+            self._check_server_health()
+            self._warn_server_down()
+            return
+        try:
+            team_id = int(team_id)
+            task_id = int(task_id)
+        except Exception:
+            return
+        self.content_stack.setCurrentIndex(9)
+        try:
+            self._set_active_nav(self.btn_teams)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.page_team, "refresh_teams"):
+                self.page_team.refresh_teams()
+            combo = getattr(self.page_team, "team_combo", None)
+            if combo is not None:
+                idx = combo.findData(team_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            QTimer.singleShot(900, lambda: self.page_team.show_task_details(task_id))
+        except Exception:
+            pass
+
     def on_page_changed(self, index):
         """Auto-refresh data when clicking on a tab"""
         if index == 1:  # Tasks page
@@ -678,6 +743,15 @@ class MainApp(QMainWindow):
             if hasattr(self.page_team, "refresh_teams"):
                 self.page_team.refresh_teams()
             self._set_active_nav(self.btn_teams)
+        elif index == 10:  # Profile
+            try:
+                if hasattr(self, "page_profile") and hasattr(self.page_profile, "load_profile"):
+                    self.page_profile.load_profile()
+            except Exception:
+                pass
+            self._set_active_nav(self.btn_profile)
+        elif index == 11:  # Search
+            self._set_active_nav(self.btn_search)
 
     def open_pomodoro_for_task(self, t_id, title, priority=None, task_type=None):
         if hasattr(self, "page_pomodoro") and hasattr(self.page_pomodoro, "set_task"):
@@ -779,7 +853,8 @@ class MainApp(QMainWindow):
                 btn.update()
 
     def get_settings_path(self):
-        return os.path.join(os.getcwd(), "settings.json")
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(root_dir, "settings.json")
 
     def apply_settings(self):
         """Reads JSON and applies theme to ALL pages."""
@@ -826,10 +901,23 @@ class MainApp(QMainWindow):
 
         if hasattr(self, 'page_quick_stats'):
             self.page_quick_stats.update_theme(theme)
+
+        if hasattr(self, "page_profile"):
+            try:
+                if hasattr(self.page_profile, "update_theme"):
+                    self.page_profile.update_theme(theme)
+            except Exception:
+                pass
         if hasattr(self, 'page_team'):
             try:
                 if hasattr(self.page_team, 'update_theme'):
                     self.page_team.update_theme(theme)
+            except Exception:
+                pass
+        if hasattr(self, "page_search"):
+            try:
+                if hasattr(self.page_search, "update_theme"):
+                    self.page_search.update_theme(theme)
             except Exception:
                 pass
         if hasattr(self, 'page_settings'):
@@ -1376,6 +1464,18 @@ if __name__ == "__main__":
             
         # Exit cleanly on Ctrl+C without a traceback.
         signal.signal(signal.SIGINT, lambda *_: app.quit())
+        try:
+            # Ensure the local server doesn't keep running after closing/crashing the app.
+            def _quit_cleanup():
+                try:
+                    api_shutdown_local_server(timeout=0.8)
+                except Exception:
+                    pass
+                stop_managed_server()
+
+            app.aboutToQuit.connect(_quit_cleanup)
+        except Exception:
+            pass
 
         window = MainApp()
         window.showMaximized()

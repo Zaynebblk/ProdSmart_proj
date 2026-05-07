@@ -1,13 +1,14 @@
 ﻿import sqlite3
 import json
 import os
-from datetime import datetime
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+import calendar
+from datetime import datetime, timedelta, timezone
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QPushButton, QScrollArea, QDialog,
                              QLineEdit, QDateEdit, QComboBox, QMessageBox,
                              QCheckBox, QGraphicsDropShadowEffect, QSizePolicy,
-                             QSystemTrayIcon, QGridLayout)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl, QLocale
+                             QSystemTrayIcon, QGridLayout, QSpinBox, QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog, QMenu)
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer, QUrl, QLocale, QSize, QEvent
 from PyQt6.QtGui import QColor, QIcon, QFontMetrics
 from PyQt6.QtMultimedia import QSoundEffect
 from resources.theme import get_theme, FONT_FAMILY, rgba
@@ -24,6 +25,7 @@ from resources.priority import (
     priority_to_quadrant,
     quadrant_from_flags,
 )
+from database.db_manager import get_db_connection as _get_db_connection, init_db as _init_local_db
 
 # --- NO WHEEL COMBOBOX ---
 class NoWheelComboBox(QComboBox):
@@ -149,11 +151,22 @@ REQUIRED_IMPORTANT_TYPES = {"Deep Work", "Goal-related"}
 
 # --- DIALOGS ---
 class AddTaskDialog(QDialog):
-    def __init__(self, parent=None, title_text="New Task", theme="Light"):
+    def __init__(
+        self,
+        parent=None,
+        title_text="New Task",
+        theme="Light",
+        enable_recurrence: bool = True,
+        enable_assignment: bool = False,
+        assignees: list | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title_text)
         self.setFixedWidth(400)
         self.setStyleSheet(get_dialog_style(theme))
+        self._enable_recurrence = bool(enable_recurrence)
+        self._enable_assignment = bool(enable_assignment)
+        self._assignees = list(assignees or [])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -237,6 +250,51 @@ class AddTaskDialog(QDialog):
         row.addWidget(self.important_check)
         layout.addLayout(row)
 
+        self.repeat_combo = None
+        self.repeat_interval = None
+        if self._enable_recurrence:
+            lbl_repeat = QLabel("Repeat for")
+            layout.addWidget(lbl_repeat)
+
+            repeat_row = QHBoxLayout()
+            self.repeat_combo = NoWheelComboBox()
+            self.repeat_combo.setMinimumHeight(40)
+            self.repeat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.repeat_combo.addItem("No repeat", userData="")
+            self.repeat_combo.addItem("Daily", userData="daily")
+            self.repeat_combo.addItem("Weekly", userData="weekly")
+            self.repeat_combo.addItem("Monthly", userData="monthly")
+
+            self.repeat_interval = QSpinBox()
+            self.repeat_interval.setRange(1, 30)
+            self.repeat_interval.setValue(1)
+            self.repeat_interval.setFixedHeight(40)
+            self.repeat_interval.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            repeat_row.addWidget(self.repeat_combo, 2)
+            repeat_row.addWidget(self.repeat_interval, 1)
+            layout.addLayout(repeat_row)
+
+            self.repeat_combo.currentIndexChanged.connect(self._sync_repeat_interval_ui)
+            self._sync_repeat_interval_ui()
+
+        self.assignee_combo = None
+        if self._enable_assignment:
+            lbl_assignee = QLabel("Assignee")
+            layout.addWidget(lbl_assignee)
+
+            self.assignee_combo = NoWheelComboBox()
+            self.assignee_combo.setMinimumHeight(40)
+            self.assignee_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.assignee_combo.addItem("Unassigned", userData=None)
+            for item in self._assignees:
+                try:
+                    uid, uname = item
+                except Exception:
+                    continue
+                self.assignee_combo.addItem(str(uname), userData=int(uid))
+            layout.addWidget(self.assignee_combo)
+
         layout.addSpacing(10)
 
         btn_layout = QHBoxLayout()
@@ -250,13 +308,50 @@ class AddTaskDialog(QDialog):
         self.btn_save.setFixedSize(120, 40)
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_save.clicked.connect(self.accept)
+        try:
+            # Allow pressing Enter to submit the dialog.
+            self.btn_save.setDefault(True)
+            self.btn_save.setAutoDefault(True)
+        except Exception:
+            pass
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
+
+        # Enter key convenience on common fields.
+        try:
+            self.title_input.returnPressed.connect(self.accept)
+        except Exception:
+            pass
+        try:
+            self.desc_input.returnPressed.connect(self.accept)
+        except Exception:
+            pass
         self._on_important_changed(self.important_check.isChecked())
         self._sync_type_requirement()
+
+    def _sync_repeat_interval_ui(self):
+        if not self._enable_recurrence or not self.repeat_combo or not self.repeat_interval:
+            return
+        kind = self.repeat_combo.currentData()
+        enabled = bool(str(kind or "").strip())
+        self.repeat_interval.setEnabled(enabled)
+        self.repeat_interval.setVisible(enabled)
+        if not enabled:
+            return
+        suffix = ""
+        if kind == "daily":
+            suffix = " day(s)"
+        elif kind == "weekly":
+            suffix = " week(s)"
+        elif kind == "monthly":
+            suffix = " month(s)"
+        try:
+            self.repeat_interval.setSuffix(suffix)
+        except Exception:
+            pass
 
     def _set_title_error(self, show):
         self.title_error.setVisible(bool(show))
@@ -269,7 +364,17 @@ class AddTaskDialog(QDialog):
         self._set_title_error(False)
         super().accept()
 
-    def load_data(self, title, desc, date_str, important, task_type=None):
+    def load_data(
+        self,
+        title,
+        desc,
+        date_str,
+        important,
+        task_type=None,
+        recurrence_kind=None,
+        recurrence_interval=1,
+        assigned_to=None,
+    ):
         self.title_input.setText(title)
         self.desc_input.setText(desc)
         if date_str:
@@ -292,6 +397,25 @@ class AddTaskDialog(QDialog):
         else:
             self.type_combo.setCurrentIndex(0)
         self._sync_type_requirement()
+        if self._enable_recurrence and self.repeat_combo and self.repeat_interval:
+            kind = str(recurrence_kind or "").strip().lower()
+            idx = self.repeat_combo.findData(kind if kind in ("daily", "weekly", "monthly") else "")
+            if idx >= 0:
+                self.repeat_combo.setCurrentIndex(idx)
+            try:
+                self.repeat_interval.setValue(max(1, int(recurrence_interval or 1)))
+            except Exception:
+                self.repeat_interval.setValue(1)
+            self._sync_repeat_interval_ui()
+        if self._enable_assignment and self.assignee_combo is not None:
+            uid = assigned_to
+            try:
+                uid = int(uid) if uid is not None else None
+            except Exception:
+                uid = None
+            idx = self.assignee_combo.findData(uid)
+            if idx >= 0:
+                self.assignee_combo.setCurrentIndex(idx)
 
     def get_data(self):
         important = self.important_check.isChecked()
@@ -306,12 +430,29 @@ class AddTaskDialog(QDialog):
                 self.important_check.setChecked(True)
             except Exception:
                 pass
+        recurrence_kind = ""
+        recurrence_interval = 1
+        if self._enable_recurrence and self.repeat_combo and self.repeat_interval:
+            recurrence_kind = str(self.repeat_combo.currentData() or "").strip().lower()
+            try:
+                recurrence_interval = max(1, int(self.repeat_interval.value()))
+            except Exception:
+                recurrence_interval = 1
+        assigned_to = None
+        if self._enable_assignment and self.assignee_combo is not None:
+            try:
+                assigned_to = self.assignee_combo.currentData()
+            except Exception:
+                assigned_to = None
         return {
             "title": self.title_input.text(),
             "description": self.desc_input.text(),
             "date": self.date_input.date().toString("yyyy-MM-dd"),
             "important": important,
             "task_type": task_type,
+            "recurrence_kind": recurrence_kind,
+            "recurrence_interval": recurrence_interval,
+            "assigned_to": assigned_to,
         }
 
     def _on_important_changed(self, state):
@@ -335,21 +476,66 @@ class AddTaskDialog(QDialog):
             self.important_check.setEnabled(True)
 
 class ViewTaskDialog(QDialog):
-    def __init__(self, title, desc, due_date, created_date, priority, task_type=None, total_focus_min=0, total_sessions=0, sessions=None, parent=None, theme="Light"):
+    def __init__(
+        self,
+        title,
+        desc,
+        due_date,
+        created_date,
+        priority,
+        task_type=None,
+        total_focus_min=0,
+        total_sessions=0,
+        sessions=None,
+        parent=None,
+        theme="Light",
+        task_id: int | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Task Details")
         self.setFixedWidth(400)
         if sessions is None:
             sessions = []
+        self.task_id = task_id
+        self._loading_subtasks = False
+        self._loading_dependencies = False
 
         bg = "#113356" if theme == "Dark" else "#F8F6F2"
         txt = "#e6eef5" if theme == "Dark" else "#113356"
         box_bg = "#1b2f4d" if theme == "Dark" else "#ffffff"
+        input_bg = box_bg
+        border = "#25456B" if theme == "Dark" else "#BAD2E0"
 
         self.setStyleSheet(f"QDialog {{ background-color: {bg}; }} QLabel {{ color: {txt}; }}")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
+        self._did_constrain_to_screen = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(40, 40, 40, 40)
+        root.setSpacing(12)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {bg}; }} "
+            f"QScrollArea > QWidget > QWidget {{ background: {bg}; }} "
+            f"QScrollBar:vertical {{ background: {bg}; width: 10px; margin: 0px; }} "
+            f"QScrollBar::handle:vertical {{ background: {border}; border-radius: 5px; min-height: 24px; }} "
+            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }} "
+            f"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}"
+        )
+        root.addWidget(scroll_area, 1)
+
+        content = QWidget()
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        content.setStyleSheet(f"background: {bg};")
+        scroll_area.setWidget(content)
+
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         p_colors = PRIORITY_COLORS
         c = p_colors.get(priority, "#718096")
@@ -395,6 +581,143 @@ class ViewTaskDialog(QDialog):
 
         layout.addSpacing(16)
 
+        if self.task_id:
+            # Subtasks
+            subt_header = QHBoxLayout()
+            subt_lbl = QLabel("SUBTASKS")
+            subt_lbl.setStyleSheet("font-size: 11px; font-weight: 900; letter-spacing: 1px; color: #82AFF2;")
+            self.subtask_summary = QLabel("")
+            self.subtask_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #82AFF2;")
+            subt_header.addWidget(subt_lbl)
+            subt_header.addStretch()
+            subt_header.addWidget(self.subtask_summary)
+            layout.addLayout(subt_header)
+
+            subt_card = QFrame()
+            subt_card.setStyleSheet(f"background: {box_bg}; border-radius: 10px; padding: 12px;")
+            subt_l = QVBoxLayout(subt_card)
+            subt_l.setContentsMargins(0, 0, 0, 0)
+            subt_l.setSpacing(10)
+
+            add_row = QHBoxLayout()
+            add_row.setSpacing(8)
+            self.subtask_input = QLineEdit()
+            self.subtask_input.setPlaceholderText("Add a subtask…")
+            self.subtask_input.setStyleSheet(
+                f"background: {input_bg}; border: 1px solid {border}; border-radius: 10px; padding: 8px 10px;"
+            )
+            self.subtask_input.returnPressed.connect(self._add_subtask)
+            add_row.addWidget(self.subtask_input, 1)
+
+            btn_add = QPushButton("+")
+            btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_add.setFixedSize(40, 36)
+            btn_add.setStyleSheet(STYLES["btn_secondary"])
+            btn_add.clicked.connect(self._add_subtask)
+            add_row.addWidget(btn_add)
+
+            btn_del = QPushButton("Delete")
+            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_del.setFixedHeight(36)
+            btn_del.setStyleSheet(STYLES["btn_secondary"])
+            btn_del.clicked.connect(self._delete_selected_subtask)
+            add_row.addWidget(btn_del)
+            subt_l.addLayout(add_row)
+
+            self.subtask_list = QListWidget()
+            self.subtask_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.subtask_list.setWordWrap(True)
+            try:
+                self.subtask_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+            except Exception:
+                pass
+            try:
+                self.subtask_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            except Exception:
+                pass
+            try:
+                self.subtask_list.verticalScrollBar().setSingleStep(12)
+            except Exception:
+                pass
+            try:
+                self.subtask_list.setSpacing(8)
+            except Exception:
+                pass
+            self.subtask_list.setStyleSheet(
+                f"QListWidget {{ background: transparent; border: 0; color: {txt}; }} "
+                f"QListWidget::item {{ background: {input_bg}; border: 1px solid {border}; border-radius: 14px; padding: 10px 12px; }} "
+                f"QListWidget::item:selected {{ background: rgba(48, 120, 205, 40); border: 1px solid #82AFF2; }}"
+            )
+            self.subtask_list.setFixedHeight(170)
+            self.subtask_list.itemChanged.connect(self._on_subtask_changed)
+            try:
+                self.subtask_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                self.subtask_list.customContextMenuRequested.connect(self._subtask_context_menu)
+            except Exception:
+                pass
+            try:
+                self.subtask_list.installEventFilter(self)
+            except Exception:
+                pass
+            subt_l.addWidget(self.subtask_list)
+            layout.addWidget(subt_card)
+
+            # Dependencies
+            dep_header = QHBoxLayout()
+            dep_lbl = QLabel("DEPENDENCIES")
+            dep_lbl.setStyleSheet("font-size: 11px; font-weight: 900; letter-spacing: 1px; color: #82AFF2;")
+            self.dep_summary = QLabel("")
+            self.dep_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #82AFF2;")
+            dep_header.addWidget(dep_lbl)
+            dep_header.addStretch()
+            dep_header.addWidget(self.dep_summary)
+            layout.addLayout(dep_header)
+
+            dep_card = QFrame()
+            dep_card.setStyleSheet(f"background: {box_bg}; border-radius: 10px; padding: 12px;")
+            dep_l = QVBoxLayout(dep_card)
+            dep_l.setContentsMargins(0, 0, 0, 0)
+            dep_l.setSpacing(10)
+
+            dep_row = QHBoxLayout()
+            dep_row.setSpacing(8)
+            btn_add_dep = QPushButton("Add dependency")
+            btn_add_dep.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_add_dep.setStyleSheet(STYLES["btn_secondary"])
+            btn_add_dep.clicked.connect(self._add_dependency)
+            dep_row.addWidget(btn_add_dep)
+
+            btn_del_dep = QPushButton("Remove")
+            btn_del_dep.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_del_dep.setStyleSheet(STYLES["btn_secondary"])
+            btn_del_dep.clicked.connect(self._remove_selected_dependency)
+            dep_row.addWidget(btn_del_dep)
+            dep_row.addStretch()
+            dep_l.addLayout(dep_row)
+
+            self.dep_list = QListWidget()
+            self.dep_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.dep_list.setWordWrap(True)
+            try:
+                self.dep_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+            except Exception:
+                pass
+            try:
+                self.dep_list.setSpacing(8)
+            except Exception:
+                pass
+            self.dep_list.setStyleSheet(
+                f"QListWidget {{ background: transparent; border: 0; color: {txt}; }} "
+                f"QListWidget::item {{ background: {input_bg}; border: 1px solid {border}; border-radius: 14px; padding: 10px 12px; }} "
+                f"QListWidget::item:selected {{ background: rgba(48, 120, 205, 40); border: 1px solid #82AFF2; }}"
+            )
+            self.dep_list.setFixedHeight(130)
+            dep_l.addWidget(self.dep_list)
+            layout.addWidget(dep_card)
+
+            self._load_subtasks()
+            self._load_dependencies()
+
         # Pomodoro summary + sessions
         summary = QLabel(f"Focus total: {format_duration_minutes(total_focus_min)}  -  Sessions: {total_sessions}")
         summary.setStyleSheet(f"color: {txt}; font-size: 11px; font-weight: 700;")
@@ -431,16 +754,357 @@ class ViewTaskDialog(QDialog):
 
         layout.addWidget(sess_box)
 
-        layout.addSpacing(12)
-        btn = QPushButton("Close")
+        btn = QPushButton("Save")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(STYLES["btn_secondary"])
+        btn.setStyleSheet(STYLES["btn_primary"])
+        btn.setFixedHeight(38)
+        try:
+            btn.setDefault(True)
+        except Exception:
+            pass
         btn.clicked.connect(self.accept)
-        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer.addWidget(btn)
+        root.addLayout(footer)
+
+    def showEvent(self, event):
+        if not self._did_constrain_to_screen:
+            self._did_constrain_to_screen = True
+            self._constrain_to_screen_height()
+        super().showEvent(event)
+
+    def _constrain_to_screen_height(self):
+        screen = None
+        try:
+            screen = self.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            try:
+                screen = QApplication.primaryScreen()
+            except Exception:
+                screen = None
+        if screen is None:
+            return
+
+        try:
+            avail = screen.availableGeometry()
+            max_h = max(320, int(avail.height() * 0.92))
+            self.setMaximumHeight(max_h)
+            hint_h = int(self.sizeHint().height())
+            if hint_h > 0:
+                self.resize(self.width(), min(hint_h, max_h))
+        except Exception:
+            return
+
+    def _db(self):
+        return _get_db_connection()
+
+    def _format_ts(self, raw, assume_utc: bool = True):
+        if raw is None:
+            return ""
+        raw_text = str(raw).strip().replace("T", " ").split(".")[0]
+        if not raw_text:
+            return ""
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(raw_text, fmt)
+                if "H" in fmt:
+                    if assume_utc:
+                        try:
+                            dt = dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+                        except Exception:
+                            pass
+                    return dt.strftime("%b %d, %H:%M")
+                return dt.strftime("%b %d, %Y")
+            except Exception:
+                continue
+        return raw_text
+
+    def _subtask_item_text(self, title: str, created_at=None, completed_at=None) -> str:
+        safe_title = str(title or "").strip() or "Untitled"
+        meta = []
+        created_fmt = self._format_ts(created_at, assume_utc=True)
+        if created_fmt:
+            meta.append(f"Added {created_fmt}")
+        completed_fmt = self._format_ts(completed_at, assume_utc=False)
+        if completed_fmt:
+            meta.append(f"Done {completed_fmt}")
+        if meta:
+            # Each meta on its own line to avoid elision ("...") in narrow list items.
+            return safe_title + "\n" + "\n".join(meta)
+        return safe_title
+
+    def _load_subtasks(self):
+        if not self.task_id:
+            return
+        self._loading_subtasks = True
+        try:
+            self.subtask_list.clear()
+            conn = self._db()
+            rows = conn.execute(
+                "SELECT id, title, is_completed, created_at, completed_at FROM task_subtasks WHERE task_id=? ORDER BY id",
+                (int(self.task_id),),
+            ).fetchall()
+            conn.close()
+            total = 0
+            done_count = 0
+            for sid, title, done, created_at, completed_at in rows:
+                total += 1
+                is_done = int(done or 0) != 0
+                done_count += 1 if is_done else 0
+                text = self._subtask_item_text(title, created_at, completed_at if is_done else None)
+                item = QListWidgetItem(text)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                item.setCheckState(Qt.CheckState.Checked if is_done else Qt.CheckState.Unchecked)
+                item.setData(Qt.ItemDataRole.UserRole, int(sid))
+                item.setData(Qt.ItemDataRole.UserRole + 1, str(title or "").strip())
+                item.setData(Qt.ItemDataRole.UserRole + 2, created_at)
+                item.setData(Qt.ItemDataRole.UserRole + 3, completed_at)
+                lines = max(1, str(text).count("\n") + 1)
+                item.setSizeHint(QSize(0, 22 + lines * 18))
+                self.subtask_list.addItem(item)
+            try:
+                if hasattr(self, "subtask_summary"):
+                    self.subtask_summary.setText(f"{done_count}/{total} done" if total else "0/0 done")
+            except Exception:
+                pass
+        finally:
+            self._loading_subtasks = False
+
+    def _add_subtask(self):
+        if not self.task_id:
+            return
+        text = ""
+        try:
+            text = self.subtask_input.text().strip()
+        except Exception:
+            text = ""
+        if not text:
+            return
+        conn = self._db()
+        conn.execute(
+            "INSERT INTO task_subtasks (task_id, title, is_completed) VALUES (?,?,0)",
+            (int(self.task_id), text),
+        )
+        conn.commit()
+        conn.close()
+        try:
+            self.subtask_input.clear()
+        except Exception:
+            pass
+        self._load_subtasks()
+
+    def _delete_selected_subtask(self):
+        if not self.task_id:
+            return
+        item = self.subtask_list.currentItem() if hasattr(self, "subtask_list") else None
+        if not item:
+            return
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        if not sid:
+            return
+        conn = self._db()
+        conn.execute("DELETE FROM task_subtasks WHERE id=? AND task_id=?", (int(sid), int(self.task_id)))
+        conn.commit()
+        conn.close()
+        self._load_subtasks()
+
+    def _subtask_context_menu(self, pos):
+        if not hasattr(self, "subtask_list"):
+            return
+        item = self.subtask_list.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        act_del = menu.addAction("Delete subtask")
+        chosen = menu.exec(self.subtask_list.mapToGlobal(pos))
+        if chosen == act_del:
+            try:
+                self.subtask_list.setCurrentItem(item)
+            except Exception:
+                pass
+            self._delete_selected_subtask()
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj is getattr(self, "subtask_list", None) and event.type() == QEvent.Type.KeyPress:
+                if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                    self._delete_selected_subtask()
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _on_subtask_changed(self, item):
+        if self._loading_subtasks or not self.task_id:
+            return
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        if not sid:
+            return
+        try:
+            # Make the toggled item the current selection so the "Delete" button works as expected.
+            self.subtask_list.setCurrentItem(item)
+        except Exception:
+            pass
+        done = item.checkState() == Qt.CheckState.Checked
+        completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if done else None
+        conn = self._db()
+        conn.execute(
+            "UPDATE task_subtasks SET is_completed=?, completed_at=? WHERE id=? AND task_id=?",
+            (1 if done else 0, completed_at, int(sid), int(self.task_id)),
+        )
+        conn.commit()
+        conn.close()
+        self._load_subtasks()
+
+    def _load_dependencies(self):
+        if not self.task_id:
+            return
+        self._loading_dependencies = True
+        try:
+            self.dep_list.clear()
+            conn = self._db()
+            rows = conn.execute(
+                """SELECT d.depends_on_task_id, t.title, t.is_completed, t.created_date, t.due_date
+                   FROM task_dependencies d
+                   JOIN tasks t ON t.id = d.depends_on_task_id
+                   WHERE d.task_id = ?
+                   ORDER BY t.is_completed, t.due_date""",
+                (int(self.task_id),),
+            ).fetchall()
+            conn.close()
+            for dep_id, title, done, created, due in rows:
+                meta = []
+                if created:
+                    meta.append(f"Created {created}")
+                if due:
+                    meta.append(f"Due {due}")
+                if int(done or 0):
+                    meta.append("completed")
+                text = str(title or "").strip() or "Untitled"
+                if meta:
+                    text += "\n" + "  ·  ".join(meta)
+                item = QListWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, int(dep_id))
+                lines = max(1, str(text).count("\n") + 1)
+                item.setSizeHint(QSize(0, 18 + lines * 18))
+                self.dep_list.addItem(item)
+            try:
+                if hasattr(self, "dep_summary"):
+                    self.dep_summary.setText(f"{len(rows)} item(s)" if rows else "0 item")
+            except Exception:
+                pass
+        finally:
+            self._loading_dependencies = False
+
+    def _add_dependency(self):
+        if not self.task_id:
+            return
+        conn = self._db()
+        try:
+            current = conn.execute(
+                "SELECT due_date FROM tasks WHERE id=?",
+                (int(self.task_id),),
+            ).fetchone()
+            if not current:
+                return
+            cur_due = str(current[0] or "").strip()
+
+            # Only allow dependencies whose due date is not after this task's due date.
+            rows = conn.execute(
+                "SELECT id, title, created_date, due_date, is_completed FROM tasks WHERE id != ? ORDER BY due_date",
+                (int(self.task_id),),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            QMessageBox.information(self, "Dependencies", "No other tasks found.")
+            return
+        labels = []
+        mapping = {}
+        for tid, title, created, due, done in rows:
+            created_s = str(created or "").strip()
+            due_s = str(due or "").strip()
+
+            if cur_due:
+                # If the current task has a deadline, require the dependency to have a deadline
+                # and to be due on/before the current task's deadline.
+                if not due_s:
+                    continue
+                if due_s > cur_due:
+                    continue
+
+            meta = []
+            if created_s:
+                meta.append(f"Created {created_s}")
+            if due_s:
+                meta.append(f"Due {due_s}")
+            if int(done or 0):
+                meta.append("completed")
+            suffix = f"  ({' · '.join(meta)})" if meta else ""
+            label = f"{title}{suffix}"
+            labels.append(label)
+            mapping[label] = int(tid)
+        if not labels:
+            QMessageBox.information(
+                self,
+                "Dependencies",
+                "No eligible dependencies found.\n\nDependencies must have a due date on/before this task's due date.",
+            )
+            return
+        choice, ok = QInputDialog.getItem(self, "Add dependency", "This task depends on:", labels, 0, False)
+        if not ok:
+            return
+        dep_id = mapping.get(choice)
+        if not dep_id:
+            return
+        conn = self._db()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)",
+                (int(self.task_id), int(dep_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._load_dependencies()
+
+    def _remove_selected_dependency(self):
+        if not self.task_id:
+            return
+        item = self.dep_list.currentItem() if hasattr(self, "dep_list") else None
+        if not item:
+            return
+        dep_id = item.data(Qt.ItemDataRole.UserRole)
+        if not dep_id:
+            return
+        conn = self._db()
+        conn.execute(
+            "DELETE FROM task_dependencies WHERE task_id=? AND depends_on_task_id=?",
+            (int(self.task_id), int(dep_id)),
+        )
+        conn.commit()
+        conn.close()
+        self._load_dependencies()
 
 # --- TASK CARD ---
 class TaskCard(QFrame):
-    def __init__(self, t_id, title, desc, due_date_pretty, created_date_pretty, priority, focus_minutes, parent_page, is_completed=False, task_type=None):
+    def __init__(
+        self,
+        t_id,
+        title,
+        desc,
+        due_date_pretty,
+        created_date_pretty,
+        priority,
+        focus_minutes,
+        parent_page,
+        is_completed=False,
+        task_type=None,
+        extra_meta: str | None = None,
+    ):
         super().__init__()
         self.t_id = t_id
         self.parent_page = parent_page
@@ -517,6 +1181,11 @@ class TaskCard(QFrame):
         self.lbl_desc.setMaximumHeight(40)
         self.lbl_desc.setVisible(bool(desc))
         layout.addWidget(self.lbl_desc)
+
+        self.lbl_extra = QLabel(extra_meta or "", content)
+        self.lbl_extra.setWordWrap(True)
+        self.lbl_extra.setVisible(bool(extra_meta))
+        layout.addWidget(self.lbl_extra)
 
         footer = QVBoxLayout()
         footer.setSpacing(8)
@@ -597,12 +1266,15 @@ class TaskCard(QFrame):
         if self.current_theme == "Dark":
             title_color = checked_color if checked else colors["text"]
             desc_color = colors["sub"] if not checked else checked_color
+            extra_color = colors["sub"] if not checked else checked_color
         else:
             title_color = checked_color if checked else colors["text"]
             desc_color = checked_color if checked else colors["sub"]
+            extra_color = checked_color if checked else colors["sub"]
 
         self.lbl_title.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800; border: none; background: transparent;")
         self.lbl_desc.setStyleSheet(f"color: {desc_color}; font-size: 11px; border: none; background: transparent;")
+        self.lbl_extra.setStyleSheet(f"color: {extra_color}; font-size: 10px; font-weight: 700; border: none; background: transparent;")
 
     def update_theme(self, theme):
         self.current_theme = theme
@@ -1324,25 +1996,11 @@ class TasksPage(QWidget):
 
     # --- BDD ---
     def get_db_connection(self):
-        return sqlite3.connect("prodsmart.db")
+        return _get_db_connection()
 
     def init_db(self):
-        conn = self.get_db_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT, description TEXT, due_date TEXT, priority TEXT,
-                created_date TEXT, task_type TEXT, is_completed INTEGER DEFAULT 0,
-                is_urgent INTEGER DEFAULT 0, is_important INTEGER DEFAULT 0
-            )
-        """)
-        try: conn.execute("ALTER TABLE tasks ADD COLUMN created_date TEXT")
-        except sqlite3.OperationalError: pass
-        try: conn.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
-        except sqlite3.OperationalError: pass
-        try: conn.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT")
-        except sqlite3.OperationalError: pass
-        conn.close()
+        # Use the central DB initializer so app behavior does not depend on cwd.
+        _init_local_db()
 
     # --- Actions ---
     def prompt_new_task(self):
@@ -1434,18 +2092,22 @@ class TasksPage(QWidget):
             ViewTaskDialog(
                 row[0], row[1], row[2], created, prio, task_type,
                 total_focus_min, total_sessions, sessions_widgets,
-                self, theme=self.current_theme
+                self, theme=self.current_theme, task_id=t_id
             ).exec()
         else:
             conn.close()
 
     def edit_task(self, t_id):
         conn = self.get_db_connection()
-        row = conn.execute("SELECT title, description, due_date, task_type, is_urgent, is_important FROM tasks WHERE id=?", (t_id,)).fetchone()
+        row = conn.execute(
+            "SELECT title, description, due_date, task_type, is_urgent, is_important, recurrence_kind, recurrence_interval "
+            "FROM tasks WHERE id=?",
+            (t_id,),
+        ).fetchone()
         conn.close()
         if row:
             dlg = AddTaskDialog(self, "Edit Task", theme=self.current_theme)
-            dlg.load_data(row[0], row[1], row[2], row[5], row[3])
+            dlg.load_data(row[0], row[1], row[2], row[5], row[3], row[6], row[7])
             if dlg.exec():
                 data = dlg.get_data()
                 self.update_task_in_db(t_id, data)
@@ -1453,16 +2115,211 @@ class TasksPage(QWidget):
                 self.task_added.emit()
 
     def delete_task(self, t_id):
-        if QMessageBox.question(self, "Delete", "Remove this Task?", QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            conn = self.get_db_connection()
-            conn.execute("DELETE FROM tasks WHERE id=?", (t_id,))
-            conn.commit()
-            conn.close()
-            self.refresh_tasks()
-            self.task_added.emit()
+        conn = self.get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT title, due_date, recurrence_kind, recurrence_anchor_id FROM tasks WHERE id=?",
+                (int(t_id),),
+            ).fetchone()
+        except Exception:
+            row = None
+        conn.close()
+
+        title = str(row[0] or "").strip() if row else ""
+        due_date = str(row[1] or "").strip() if row else ""
+        recurrence_kind = str(row[2] or "").strip().lower() if row else ""
+        try:
+            recurrence_anchor_id = int(row[3]) if row and row[3] is not None else int(t_id)
+        except Exception:
+            recurrence_anchor_id = int(t_id)
+
+        is_recurring = bool(recurrence_kind)
+
+        if is_recurring:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Delete Recurring Task")
+            pretty_title = f" ({title})" if title else ""
+            box.setText(f"Delete this recurring task{pretty_title}?\n\nChoose what to remove:")
+
+            btn_occ = box.addButton("This occurrence only", QMessageBox.ButtonRole.AcceptRole)
+            btn_series = box.addButton("Entire series", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(btn_occ)
+
+            try:
+                box.exec()
+            except Exception:
+                return
+
+            clicked = box.clickedButton()
+            if clicked == btn_occ:
+                # Record a skip so the app doesn't auto-recreate this due date.
+                conn = self.get_db_connection()
+                if due_date:
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO recurrence_skips (recurrence_anchor_id, recurrence_kind, due_date) VALUES (?,?,?)",
+                            (int(recurrence_anchor_id), str(recurrence_kind), str(due_date)),
+                        )
+                    except Exception:
+                        pass
+                try:
+                    conn.execute("DELETE FROM task_subtasks WHERE task_id=?", (int(t_id),))
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "DELETE FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?",
+                        (int(t_id), int(t_id)),
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute("DELETE FROM pomodoro_sessions WHERE task_id=?", (int(t_id),))
+                except Exception:
+                    pass
+                try:
+                    conn.execute("DELETE FROM tasks WHERE id=?", (int(t_id),))
+                except Exception:
+                    pass
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+                try:
+                    self.refresh_tasks()
+                    self.task_added.emit()
+                except Exception:
+                    pass
+                return
+
+            if clicked == btn_series:
+                conn = self.get_db_connection()
+                try:
+                    ids = conn.execute(
+                        "SELECT id FROM tasks WHERE recurrence_anchor_id=? AND TRIM(LOWER(recurrence_kind))=?",
+                        (int(recurrence_anchor_id), str(recurrence_kind)),
+                    ).fetchall()
+                except Exception:
+                    ids = []
+
+                for r in ids or []:
+                    try:
+                        occ_id = int(r[0])
+                    except Exception:
+                        continue
+                    try:
+                        conn.execute("DELETE FROM task_subtasks WHERE task_id=?", (occ_id,))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(
+                            "DELETE FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?",
+                            (occ_id, occ_id),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute("DELETE FROM pomodoro_sessions WHERE task_id=?", (occ_id,))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute("DELETE FROM tasks WHERE id=?", (occ_id,))
+                    except Exception:
+                        pass
+
+                try:
+                    conn.execute(
+                        "DELETE FROM recurrence_skips WHERE recurrence_anchor_id=? AND recurrence_kind=?",
+                        (int(recurrence_anchor_id), str(recurrence_kind)),
+                    )
+                except Exception:
+                    pass
+
+                conn.commit()
+                conn.close()
+                try:
+                    self.refresh_tasks()
+                    self.task_added.emit()
+                except Exception:
+                    pass
+                return
+
+            # Cancel / ESC
+            return
+
+        # Non-recurring task
+        if (
+            QMessageBox.question(
+                self,
+                "Delete",
+                "Remove this Task?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        conn = self.get_db_connection()
+        try:
+            conn.execute("DELETE FROM task_subtasks WHERE task_id=?", (int(t_id),))
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "DELETE FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?",
+                (int(t_id), int(t_id)),
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute("DELETE FROM pomodoro_sessions WHERE task_id=?", (int(t_id),))
+        except Exception:
+            pass
+        try:
+            conn.execute("DELETE FROM tasks WHERE id=?", (int(t_id),))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        self.refresh_tasks()
+        self.task_added.emit()
 
     def mark_task_completed(self, t_id, checked):
         completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if checked else None
+        if checked:
+            try:
+                conn = self.get_db_connection()
+                blocked = conn.execute(
+                    """SELECT t.title
+                       FROM task_dependencies d
+                       JOIN tasks t ON t.id = d.depends_on_task_id
+                       WHERE d.task_id = ? AND COALESCE(t.is_completed, 0) = 0
+                       ORDER BY t.due_date""",
+                    (t_id,),
+                ).fetchall()
+                conn.close()
+                if blocked:
+                    titles = [str(r[0] or "").strip() for r in blocked if r and str(r[0] or "").strip()]
+                    msg = "This task is blocked by unfinished dependencies."
+                    if titles:
+                        msg += "\n\nFinish these first:\n- " + "\n- ".join(titles[:8])
+                        if len(titles) > 8:
+                            msg += "\n- ..."
+                    QMessageBox.information(self, "Blocked", msg)
+                    try:
+                        self.refresh_tasks()
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
         conn = self.get_db_connection()
         conn.execute(
             "UPDATE tasks SET is_completed=?, completed_at=? WHERE id=?",
@@ -1470,6 +2327,11 @@ class TasksPage(QWidget):
         )
         conn.commit()
         conn.close()
+        if checked:
+            try:
+                self._maybe_spawn_next_recurrence(t_id)
+            except Exception:
+                pass
         # Refresh UI so task disappears immediately when 'Show completed' is disabled
         try:
             self.refresh_tasks()
@@ -1486,6 +2348,270 @@ class TasksPage(QWidget):
                 del self._last_remind[t_id]
         except Exception:
             pass
+
+    def _next_due_date(self, due_date_str: str, kind: str, interval: int) -> str | None:
+        raw = str(due_date_str or "").strip()
+        if not raw:
+            return None
+        try:
+            base = datetime.strptime(raw, "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+        kind = str(kind or "").strip().lower()
+        # `interval` is interpreted as "repeat for N periods" (e.g. daily for 7 days),
+        # so each occurrence advances by exactly one period.
+
+        if kind == "daily":
+            nxt = base + timedelta(days=1)
+        elif kind == "weekly":
+            nxt = base + timedelta(days=7)
+        elif kind == "monthly":
+            months = 1
+            year = base.year + (base.month - 1 + months) // 12
+            month = (base.month - 1 + months) % 12 + 1
+            day = min(base.day, calendar.monthrange(year, month)[1])
+            nxt = base.replace(year=year, month=month, day=day)
+        else:
+            return None
+
+        return nxt.strftime("%Y-%m-%d")
+
+    def _maybe_spawn_next_recurrence(self, task_id: int) -> None:
+        conn = self.get_db_connection()
+        row = conn.execute(
+            "SELECT title, description, due_date, task_type, is_important, recurrence_kind, recurrence_interval, recurrence_anchor_id "
+            "FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return
+
+        title = row[0]
+        desc = row[1]
+        due_date = row[2]
+        task_type = row[3]
+        is_imp = int(row[4] or 0)
+        kind = str(row[5] or "").strip().lower()
+        interval = row[6]
+        anchor_id = row[7] or task_id
+
+        if not kind:
+            conn.close()
+            return
+
+        try:
+            total_periods = max(1, int(interval or 1))
+        except Exception:
+            total_periods = 1
+
+        # Stop spawning once the requested number of occurrences exists for this series.
+        try:
+            series_count_row = conn.execute(
+                "SELECT COUNT(1) FROM tasks WHERE recurrence_anchor_id=? AND recurrence_kind=?",
+                (int(anchor_id), kind),
+            ).fetchone()
+            series_count = int(series_count_row[0] or 0) if series_count_row else 0
+        except Exception:
+            series_count = 0
+        if total_periods <= 1 or (series_count and series_count >= total_periods):
+            conn.close()
+            return
+
+        next_due = self._next_due_date(str(due_date or ""), kind, int(interval or 1))
+        if not next_due:
+            conn.close()
+            return
+
+        # Don't create future occurrences early: only spawn dates that should already exist (<= today).
+        today_str = QDate.currentDate().toString("yyyy-MM-dd")
+        if str(next_due) > today_str:
+            conn.close()
+            return
+
+        exists = conn.execute(
+            "SELECT 1 FROM tasks WHERE recurrence_anchor_id=? AND recurrence_kind=? AND due_date=? LIMIT 1",
+            (anchor_id, kind, next_due),
+        ).fetchone()
+        if exists:
+            conn.close()
+            return
+
+        # Respect user-deleted occurrences so they don't get re-created automatically.
+        try:
+            skipped = conn.execute(
+                "SELECT 1 FROM recurrence_skips WHERE recurrence_anchor_id=? AND recurrence_kind=? AND due_date=? LIMIT 1",
+                (int(anchor_id), str(kind), str(next_due)),
+            ).fetchone()
+        except Exception:
+            skipped = None
+        if skipped:
+            conn.close()
+            return
+
+        is_urg = self._deadline_is_urgent(next_due)
+        prio = quadrant_from_flags(is_urg, is_imp)
+        norm_type = normalize_task_type(task_type)
+
+        conn.execute(
+            "INSERT INTO tasks (title, description, due_date, created_date, priority, task_type, is_urgent, is_important, is_completed, "
+            "recurrence_kind, recurrence_interval, recurrence_anchor_id) "
+            "VALUES (?,?,?,?,?,?,?,?,0,?,?,?)",
+            (title, desc, next_due, str(next_due), prio, norm_type, is_urg, is_imp, kind, int(interval or 1), int(anchor_id)),
+        )
+        conn.commit()
+        conn.close()
+
+    def _ensure_recurrence_instances(self) -> None:
+        """Auto-spawn recurring tasks even if previous occurrences are not completed.
+
+        Semantics: `recurrence_interval` is the total number of occurrences (e.g. daily for 7 days).
+        This function is idempotent: it inserts only missing due dates for a series.
+        """
+        conn = self.get_db_connection()
+        try:
+            series = conn.execute(
+                """
+                SELECT recurrence_anchor_id, TRIM(LOWER(recurrence_kind)) AS kind, MAX(recurrence_interval) AS interval
+                FROM tasks
+                WHERE recurrence_anchor_id IS NOT NULL
+                  AND TRIM(COALESCE(recurrence_kind, '')) != ''
+                GROUP BY recurrence_anchor_id, TRIM(LOWER(recurrence_kind))
+                """
+            ).fetchall()
+
+            if not series:
+                return
+
+            today_str = QDate.currentDate().toString("yyyy-MM-dd")
+
+            for anchor_id, kind, interval in series:
+                try:
+                    anchor_id = int(anchor_id)
+                except Exception:
+                    continue
+                kind = str(kind or "").strip().lower()
+                if kind not in ("daily", "weekly", "monthly"):
+                    continue
+                try:
+                    total_periods = max(1, int(interval or 1))
+                except Exception:
+                    total_periods = 1
+                if total_periods <= 1:
+                    continue
+
+                # Older versions pre-created future occurrences; delete those so tasks only appear on/after their due date.
+                try:
+                    future_rows = conn.execute(
+                        "SELECT id FROM tasks "
+                        "WHERE recurrence_anchor_id=? AND TRIM(LOWER(recurrence_kind))=? AND id != ? AND due_date > ?",
+                        (anchor_id, kind, anchor_id, today_str),
+                    ).fetchall()
+                    for fr in future_rows or []:
+                        try:
+                            occ_id = int(fr[0])
+                        except Exception:
+                            continue
+                        try:
+                            conn.execute("DELETE FROM task_subtasks WHERE task_id=?", (occ_id,))
+                        except Exception:
+                            pass
+                        try:
+                            conn.execute(
+                                "DELETE FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?",
+                                (occ_id, occ_id),
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            conn.execute("DELETE FROM pomodoro_sessions WHERE task_id=?", (occ_id,))
+                        except Exception:
+                            pass
+                        try:
+                            conn.execute("DELETE FROM tasks WHERE id=?", (occ_id,))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                base = conn.execute(
+                    "SELECT title, description, due_date, task_type, is_important FROM tasks WHERE id=?",
+                    (anchor_id,),
+                ).fetchone()
+                if not base:
+                    base = conn.execute(
+                        "SELECT title, description, due_date, task_type, is_important "
+                        "FROM tasks WHERE recurrence_anchor_id=? AND TRIM(COALESCE(recurrence_kind, '')) != '' "
+                        "ORDER BY due_date LIMIT 1",
+                        (anchor_id,),
+                    ).fetchone()
+                if not base:
+                    continue
+
+                title, desc, base_due, task_type, is_imp = base
+                base_due = str(base_due or "").strip()
+                if not base_due:
+                    continue
+
+                existing = conn.execute(
+                    "SELECT due_date FROM tasks WHERE recurrence_anchor_id=? AND TRIM(LOWER(recurrence_kind))=?",
+                    (anchor_id, kind),
+                ).fetchall()
+                existing_due = {str(r[0] or "").strip() for r in existing if r and str(r[0] or "").strip()}
+
+                # Treat skipped occurrences as "existing" so auto-spawn doesn't re-create them.
+                try:
+                    skipped_rows = conn.execute(
+                        "SELECT due_date FROM recurrence_skips WHERE recurrence_anchor_id=? AND recurrence_kind=?",
+                        (int(anchor_id), str(kind)),
+                    ).fetchall()
+                    skipped_due = {str(r[0] or "").strip() for r in (skipped_rows or []) if r and str(r[0] or "").strip()}
+                    existing_due |= skipped_due
+                except Exception:
+                    pass
+
+                due = base_due
+                for _ in range(int(total_periods)):
+                    if not due:
+                        break
+                    # Don't create future instances: only up to today (catching up if the app wasn't opened).
+                    if str(due) > today_str:
+                        break
+                    if due and due not in existing_due:
+                        is_urg = self._deadline_is_urgent(due)
+                        prio = quadrant_from_flags(is_urg, int(is_imp or 0))
+                        norm_type = normalize_task_type(task_type)
+                        conn.execute(
+                            "INSERT INTO tasks (title, description, due_date, created_date, priority, task_type, is_urgent, is_important, is_completed, "
+                            "recurrence_kind, recurrence_interval, recurrence_anchor_id) "
+                            "VALUES (?,?,?,?,?,?,?,?,0,?,?,?)",
+                            (
+                                title,
+                                desc,
+                                due,
+                                due,
+                                prio,
+                                norm_type,
+                                is_urg,
+                                int(is_imp or 0),
+                                kind,
+                                int(total_periods),
+                                int(anchor_id),
+                            ),
+                        )
+                        existing_due.add(due)
+
+                    due = self._next_due_date(due, kind, 1) if due else None
+                    if not due:
+                        break
+
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # --- Helpers BDD ---
     def _deadline_is_urgent(self, due_date_str):
@@ -1506,11 +2632,29 @@ class TasksPage(QWidget):
         is_urg = self._deadline_is_urgent(data.get("date"))
         prio = quadrant_from_flags(is_urg, is_imp)
         task_type = normalize_task_type(data.get("task_type"))
+        recurrence_kind = str(data.get("recurrence_kind") or "").strip().lower()
+        recurrence_interval = data.get("recurrence_interval")
+        try:
+            recurrence_interval = max(1, int(recurrence_interval or 1))
+        except Exception:
+            recurrence_interval = 1
 
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
         conn = self.get_db_connection()
-        conn.execute("INSERT INTO tasks (title, description, due_date, created_date, priority, task_type, is_urgent, is_important, is_completed) VALUES (?,?,?,?,?,?,?,?,0)",
-                     (data['title'], data['description'], data['date'], today_str, prio, task_type, is_urg, is_imp))
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO tasks (title, description, due_date, created_date, priority, task_type, is_urgent, is_important, "
+            "is_completed, recurrence_kind, recurrence_interval, recurrence_anchor_id) "
+            "VALUES (?,?,?,?,?,?,?,?,0,?,?,NULL)",
+            (data["title"], data["description"], data["date"], today_str, prio, task_type, is_urg, is_imp,
+             recurrence_kind, recurrence_interval),
+        )
+        new_id = cur.lastrowid
+        if recurrence_kind:
+            cur.execute(
+                "UPDATE tasks SET recurrence_anchor_id=? WHERE id=?",
+                (int(new_id), int(new_id)),
+            )
         conn.commit()
         conn.close()
 
@@ -1519,14 +2663,39 @@ class TasksPage(QWidget):
         is_urg = self._deadline_is_urgent(data.get("date"))
         prio = quadrant_from_flags(is_urg, is_imp)
         task_type = normalize_task_type(data.get("task_type"))
+        recurrence_kind = str(data.get("recurrence_kind") or "").strip().lower()
+        recurrence_interval = data.get("recurrence_interval")
+        try:
+            recurrence_interval = max(1, int(recurrence_interval or 1))
+        except Exception:
+            recurrence_interval = 1
 
         conn = self.get_db_connection()
-        conn.execute("UPDATE tasks SET title=?, description=?, due_date=?, priority=?, task_type=?, is_urgent=?, is_important=? WHERE id=?",
-                     (data['title'], data['description'], data['date'], prio, task_type, is_urg, is_imp, t_id))
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tasks SET title=?, description=?, due_date=?, priority=?, task_type=?, is_urgent=?, is_important=?, "
+            "recurrence_kind=?, recurrence_interval=? WHERE id=?",
+            (data["title"], data["description"], data["date"], prio, task_type, is_urg, is_imp,
+             recurrence_kind, recurrence_interval, t_id),
+        )
+        if recurrence_kind:
+            cur.execute(
+                "UPDATE tasks SET recurrence_anchor_id=COALESCE(recurrence_anchor_id, id) WHERE id=?",
+                (t_id,),
+            )
+        else:
+            cur.execute(
+                "UPDATE tasks SET recurrence_anchor_id=NULL WHERE id=?",
+                (t_id,),
+            )
         conn.commit()
         conn.close()
 
     def refresh_tasks(self):
+        try:
+            self._ensure_recurrence_instances()
+        except Exception:
+            pass
         while self.columns_layout.count():
             item = self.columns_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -1839,6 +3008,10 @@ class TasksPage(QWidget):
 
     def _check_reminders(self):
         """Check DB for tasks due today and not completed; show reminder once per task per session."""
+        try:
+            self._ensure_recurrence_instances()
+        except Exception:
+            pass
         if not getattr(self, "task_reminders_enabled", True):
             return
         if not getattr(self, "enable_notifications", True):
@@ -1892,5 +3065,27 @@ class TasksPage(QWidget):
                 continue
 
     def start_pomodoro(self, t_id, title, priority=None, task_type=None):
+        try:
+            conn = self.get_db_connection()
+            blocked = conn.execute(
+                """SELECT t.title
+                   FROM task_dependencies d
+                   JOIN tasks t ON t.id = d.depends_on_task_id
+                   WHERE d.task_id = ? AND COALESCE(t.is_completed, 0) = 0
+                   ORDER BY t.due_date""",
+                (int(t_id),),
+            ).fetchall()
+            conn.close()
+            if blocked:
+                titles = [str(r[0] or "").strip() for r in blocked if r and str(r[0] or "").strip()]
+                msg = "You can't start this task because it has unfinished dependencies."
+                if titles:
+                    msg += "\n\nFinish these first:\n- " + "\n- ".join(titles[:8])
+                    if len(titles) > 8:
+                        msg += "\n- ..."
+                QMessageBox.information(self, "Blocked", msg)
+                return
+        except Exception:
+            pass
         prio = normalize_priority(priority) or "too low"
         self.pomodoro_requested.emit(t_id, title, prio, normalize_task_type(task_type))

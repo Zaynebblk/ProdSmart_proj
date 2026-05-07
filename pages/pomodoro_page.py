@@ -10,9 +10,11 @@ from PyQt6.QtCore import Qt, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPainterPath, QPen, QColor, QPixmap, QDesktopServices
 from PyQt6.QtCore import QUrl
 try:
-    from PyQt6.QtMultimedia import QSoundEffect
+    from PyQt6.QtMultimedia import QSoundEffect, QAudioOutput, QMediaPlayer
 except Exception:
     QSoundEffect = None
+    QAudioOutput = None
+    QMediaPlayer = None
 from database.db_manager import get_db_connection
 from pages.settings_page import Toggle
 from resources.theme import get_theme, FONT_FAMILY
@@ -75,6 +77,12 @@ class PomodoroPage(QWidget):
         self._force_system_focus_page = False
         self._end_sound = None
         self._suppress_next_phase_sound = False
+        self._playlist_url = ""
+        self._bg_audio_path = ""
+        self._auto_play_bg_audio = False
+        self._bg_player = None
+        self._bg_audio_output = None
+        self._bg_audio_active = False
 
         # Task-linked session state
         self.current_task_id = None
@@ -535,6 +543,17 @@ class PomodoroPage(QWidget):
         self.long_input = self.add_styled_setting(self.settings_card, "Long Break", 15)
         self.interval_input = self.add_styled_setting(self.settings_card, "Intervals", 4)
         self.interval_input.valueChanged.connect(self._on_interval_changed)
+        self._update_interval_dependent_inputs()
+
+        self.btn_open_playlist = QPushButton("Open Playlist")
+        self.btn_open_playlist.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_playlist.clicked.connect(self.open_playlist)
+        self.settings_card.layout().addWidget(self.btn_open_playlist)
+
+        self.btn_toggle_bg_audio = QPushButton("Background Audio: Off")
+        self.btn_toggle_bg_audio.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_bg_audio.clicked.connect(self.toggle_background_audio)
+        self.settings_card.layout().addWidget(self.btn_toggle_bg_audio)
 
         self.plan_card = self.create_card("Custom Plan")
         self.plan_scroll = QScrollArea()
@@ -583,6 +602,9 @@ class PomodoroPage(QWidget):
         auto_start = False
         enable_notifications = True
         sound_effects = True
+        playlist_url = ""
+        bg_audio_path = ""
+        auto_play_bg_audio = False
         self._settings_path = None
         
         # 1. Chemin absolu du dossier où se trouve ce fichier (pages/)
@@ -609,6 +631,9 @@ class PomodoroPage(QWidget):
                         auto_start = data.get("auto_start_pomodoro", False)
                         enable_notifications = data.get("enable_notifications", True)
                         sound_effects = data.get("sound_effects", True)
+                        playlist_url = str(data.get("pomodoro_playlist_url", "") or "").strip()
+                        bg_audio_path = str(data.get("pomodoro_background_audio_path", "") or "").strip()
+                        auto_play_bg_audio = bool(data.get("pomodoro_auto_play_background_audio", False))
                         found = True
                         break # On arrête de chercher
                 except Exception as e:
@@ -620,14 +645,21 @@ class PomodoroPage(QWidget):
             print("⚠️ AUCUN fichier settings.json trouvé. Le thème restera 'Light'.")
             print("👉 Avez-vous cliqué sur 'Save Changes' dans l'onglet Settings ?")
 
-        return theme, auto_start, enable_notifications, sound_effects
+        return theme, auto_start, enable_notifications, sound_effects, playlist_url, bg_audio_path, auto_play_bg_audio
 
     def apply_theme(self):
         self._prune_dead_widgets()
-        raw_theme, auto_start, enable_notifications, sound_effects = self.load_settings_data()
+        raw_theme, auto_start, enable_notifications, sound_effects, playlist_url, bg_audio_path, auto_play_bg_audio = self.load_settings_data()
         self.auto_start = bool(auto_start)
         self.enable_notifications = bool(enable_notifications)
         self.sound_effects = bool(sound_effects)
+        self._playlist_url = str(playlist_url or "").strip()
+        self._bg_audio_path = str(bg_audio_path or "").strip()
+        self._auto_play_bg_audio = bool(auto_play_bg_audio)
+        try:
+            self._sync_audio_buttons()
+        except Exception:
+            pass
         
         is_dark = str(raw_theme).strip().lower() == "dark"
         self._is_dark = is_dark
@@ -1673,6 +1705,7 @@ class PomodoroPage(QWidget):
     def toggle_timer(self):
         if self.timer.isActive():
             self.timer.stop()
+            self._stop_background_audio()
             self._update_start_button(resume=True)
             if not self._should_disable_start():
                 good = (self._theme_colors or {}).get("good", "#10b981")
@@ -1689,6 +1722,7 @@ class PomodoroPage(QWidget):
         if self.session_started_at is None:
             return
         self.timer.stop()
+        self._stop_background_audio()
         self._log_session(status="stopped")
         self._set_phase("focus", reset_time=True, notify=False)
 
@@ -1747,6 +1781,7 @@ class PomodoroPage(QWidget):
         if self.session_started_at is not None and self.phase == "focus":
             self._log_session(status="stopped")
         self.timer.stop()
+        self._stop_background_audio()
         self.sessions_completed = 0
         self.sessions_count.setText("0")
         self.plan_index = 0
@@ -1994,6 +2029,8 @@ class PomodoroPage(QWidget):
 
     def _set_phase(self, phase, reset_time=True, notify=False):
         self.phase = phase
+        if phase != "focus":
+            self._stop_background_audio()
         if reset_time:
             minutes = self._phase_minutes(phase)
             self.time_left = minutes * 60
@@ -2030,6 +2067,11 @@ class PomodoroPage(QWidget):
             self.session_task_type = self.current_task_type
             self.session_duration_min = self._phase_minutes(self.phase)
             self._start_session_record()
+        if self.phase == "focus" and self._auto_play_bg_audio:
+            try:
+                self._start_background_audio()
+            except Exception:
+                pass
         self._update_stop_button_visibility()
 
     def _ensure_tray(self):
@@ -2061,6 +2103,90 @@ class PomodoroPage(QWidget):
             self._tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
         else:
             print(f"[Pomodoro] {title}: {message}")
+
+    def _ensure_background_player(self):
+        if QMediaPlayer is None or QAudioOutput is None:
+            return False
+        if self._bg_player is not None and self._bg_audio_output is not None:
+            return True
+        try:
+            self._bg_audio_output = QAudioOutput(self)
+            self._bg_audio_output.setVolume(0.35)
+            self._bg_player = QMediaPlayer(self)
+            self._bg_player.setAudioOutput(self._bg_audio_output)
+            try:
+                self._bg_player.setLoops(QMediaPlayer.Loops.Infinite)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            self._bg_player = None
+            self._bg_audio_output = None
+            return False
+
+    def _start_background_audio(self):
+        path = str(self._bg_audio_path or "").strip()
+        if not path or not os.path.exists(path):
+            return False
+        if not self._ensure_background_player():
+            return False
+        try:
+            self._bg_player.setSource(QUrl.fromLocalFile(path))
+            self._bg_player.play()
+            self._bg_audio_active = True
+            self._sync_audio_buttons()
+            return True
+        except Exception:
+            return False
+
+    def _stop_background_audio(self):
+        try:
+            if self._bg_player is not None:
+                self._bg_player.stop()
+        except Exception:
+            pass
+        self._bg_audio_active = False
+        try:
+            self._sync_audio_buttons()
+        except Exception:
+            pass
+
+    def _sync_audio_buttons(self):
+        if hasattr(self, "btn_open_playlist"):
+            try:
+                self.btn_open_playlist.setEnabled(bool(str(self._playlist_url or "").strip()))
+            except Exception:
+                pass
+        if hasattr(self, "btn_toggle_bg_audio"):
+            has_file = bool(str(self._bg_audio_path or "").strip()) and os.path.exists(str(self._bg_audio_path))
+            ok_media = QMediaPlayer is not None and QAudioOutput is not None
+            try:
+                self.btn_toggle_bg_audio.setEnabled(bool(has_file and ok_media))
+            except Exception:
+                pass
+            status = "On" if bool(self._bg_audio_active) else "Off"
+            try:
+                self.btn_toggle_bg_audio.setText(f"Background Audio: {status}")
+            except Exception:
+                pass
+
+    def open_playlist(self):
+        url = str(self._playlist_url or "").strip()
+        if not url:
+            QMessageBox.information(self, "Playlist", "Set a Pomodoro playlist URL in Settings.")
+            return
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
+
+    def toggle_background_audio(self):
+        if self._bg_audio_active:
+            self._stop_background_audio()
+            return
+        started = self._start_background_audio()
+        if not started:
+            QMessageBox.information(self, "Background Audio", "Select a valid audio file in Settings first.")
 
     def _pomodoro_end_sound_path(self):
         root_dir = os.path.dirname(os.path.dirname(__file__))

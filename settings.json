@@ -16,18 +16,57 @@
         "Learning",
         "Uncategorized"
     ],
-    "cloud_base_url": "http://127.0.0.1:8000",
+    "cloud_base_url": "http://127.0.0.1:8144",
     "remember_me": true,
     "remembered_accounts": [
         {
-            "username": "ahmed",
-            "token": "9g_i1unHkXfPT8O1mlSkbblhU0K1JICMw6MbFW0GKxg",
-            "user_id": 5
+            "username": "test",
+            "token": "D91PtWQFrFqWNF8QSiFxWpk9PD99IV23h45JZ_erNoM",
+            "user_id": 1
+        },
+        {
+            "username": "zayneb",
+            "token": "WRIMI1q4segBH87s2hlEUu77Z7b4MtC-9E1p-y3lom0",
+            "user_id": 11
         }
     ],
-    "user_bio": "",
-    "user_profile_picture": "C:\\Users\\benam\\Desktop\\p2mprodsmart\\ProdSmart_proj\\resources\\profiles\\profile_5.png",
-    "cloud_token": "9g_i1unHkXfPT8O1mlSkbblhU0K1JICMw6MbFW0GKxg",
-    "cloud_user_id": 5,
-    "cloud_username": "ahmed"
+    "accent_color": "#00557F",
+    "accent2_color": "#55AAFF",
+    "pomodoro_playlist_url": "https://youtu.be/Vq3drzaL20A?si=PceJmfeB8oLO4D8Y",
+    "pomodoro_background_audio_path": "",
+    "pomodoro_auto_play_background_audio": true,
+    "user_profiles": {
+        "11": {
+            "bio": "bio here",
+            "role": "engineer",
+            "department": "info",
+            "join_date": "2026-05-05",
+            "two_factor": false,
+            "skills": [],
+            "local_picture_path": "C:\\Users\\LENOVO\\Desktop\\prod sout\\ProdSmart_proj\\resources\\profiles\\profile_11_20260505_100151_569335.png",
+            "projects": ""
+        },
+        "1": {
+            "join_date": "2026-04-06",
+            "bio": "",
+            "role": "",
+            "department": "info",
+            "skills": [],
+            "two_factor": false,
+            "local_picture_path": "C:\\Users\\LENOVO\\Desktop\\prod sout\\ProdSmart_proj\\resources\\profiles\\profile_1_20260505_133946_197579.png",
+            "projects": ""
+        }
+    },
+    "user_join_date": "2026-05-05",
+    "local_db_migrated_to_user_db": true,
+    "local_db_legacy_imported_users": [
+        999
+    ],
+    "local_db_legacy_skipped_users": [
+        1,
+        11
+    ],
+    "cloud_token": "D91PtWQFrFqWNF8QSiFxWpk9PD99IV23h45JZ_erNoM",
+    "cloud_user_id": 1,
+    "cloud_username": "test"
 }

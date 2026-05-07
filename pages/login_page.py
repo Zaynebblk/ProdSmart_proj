@@ -16,13 +16,17 @@ from resources.api_client import (
     api_login,
     api_me,
     api_register,
+    api_register_app_instance,
     check_server_http,
     get_base_url,
+    get_project_root,
+    normalize_base_url,
     set_base_url,
     set_token,
     load_settings,
     save_settings,
 )
+from resources.server_manager import start_managed_server, get_current_process_create_time_filetime
 from resources.theme import get_theme, FONT_FAMILY, rgba
 
 SERVER_CHECK_TIMEOUT = 1.0
@@ -175,6 +179,15 @@ class CreateAccountPage(QWidget):
         except Exception:
             pass
         card_layout.addLayout(server_block)
+
+        # Enter key submits the form (avoid forcing mouse clicks).
+        try:
+            self.username_input.returnPressed.connect(self.handle_create_account)
+            self.password_input.returnPressed.connect(self.handle_create_account)
+            self.confirm_input.returnPressed.connect(self.handle_create_account)
+            self.server_input.returnPressed.connect(self.handle_create_account)
+        except Exception:
+            pass
 
         action_layout = QHBoxLayout()
         action_layout.setSpacing(12)
@@ -505,11 +518,42 @@ class LoginPage(QWidget):
         self.update()  # Trigger repaint for gradient background
 
     def _apply_server_state(self, is_up):
+        prev = getattr(self, "_server_is_running", None)
         self._server_is_running = bool(is_up)
         if hasattr(self, "server_status"):
             self.server_status.setText("Server: running" if is_up else "Server: not running")
         if hasattr(self, "login_button"):
             self.login_button.setEnabled(bool(is_up))
+
+        if bool(is_up):
+            try:
+                url = self.server_input.text().strip() if hasattr(self, "server_input") else ""
+            except Exception:
+                url = ""
+            if not url:
+                try:
+                    url = get_base_url()
+                except Exception:
+                    url = ""
+
+            key = str(normalize_base_url(url or "")).strip().lower()
+            if getattr(self, "_app_registered_key", None) != key or prev is False or prev is None:
+                self._app_registered_key = key
+
+                pid = os.getpid()
+                create_time = None
+                try:
+                    create_time = get_current_process_create_time_filetime()
+                except Exception:
+                    create_time = None
+
+                def _reg_worker():
+                    try:
+                        api_register_app_instance(pid, create_time=create_time, timeout=0.8)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_reg_worker, daemon=True).start()
 
     def set_server_state(self, is_up):
         self._apply_server_state(bool(is_up))
@@ -766,6 +810,10 @@ class LoginPage(QWidget):
                 server_username = (res.get("username") or "").strip() if isinstance(res, dict) else ""
                 if srv_id and server_username.lower() == str(username).strip().lower():
                     self.user_id = srv_id
+                    try:
+                        self._maybe_offer_legacy_local_db_import(srv_id)
+                    except Exception:
+                        pass
                     self.login_successful.emit(srv_id)
                     return
             except ApiError:
@@ -774,18 +822,104 @@ class LoginPage(QWidget):
                 pass
         self.password_input.setFocus()
 
+    def _maybe_offer_legacy_local_db_import(self, user_id: int) -> None:
+        """Offer to import the legacy shared local DB into this account (one-time prompt)."""
+        try:
+            uid = int(user_id)
+        except Exception:
+            return
+        if uid <= 0:
+            return
+
+        try:
+            from database.db_manager import (
+                get_legacy_import_decision,
+                import_legacy_db_to_user,
+                legacy_db_has_data,
+                merge_legacy_db_to_user,
+                set_legacy_import_decision,
+                user_db_has_any_data,
+            )
+        except Exception:
+            return
+
+        try:
+            decision = get_legacy_import_decision(uid)
+        except Exception:
+            decision = None
+        if decision in ("imported", "skipped"):
+            return
+
+        try:
+            if not legacy_db_has_data():
+                return
+        except Exception:
+            return
+
+        has_user_data = False
+        try:
+            has_user_data = bool(user_db_has_any_data(uid))
+        except Exception:
+            has_user_data = False
+
+        prompt = (
+            "We found local tasks/history on this device from an older version.\n\n"
+            "Import them into this account?"
+        )
+        if has_user_data:
+            prompt = (
+                "We found local tasks/history on this device from an older version.\n\n"
+                "This account already has local data.\n\n"
+                "Merge the old local data into this account? (This may create duplicates.)"
+            )
+
+        reply = QMessageBox.question(
+            self,
+            "Local Data",
+            prompt,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if has_user_data:
+                ok, msg = merge_legacy_db_to_user(uid, backup_existing=True)
+            else:
+                ok, msg = import_legacy_db_to_user(uid, overwrite_if_empty=True, backup_existing=True)
+            if ok:
+                try:
+                    QMessageBox.information(self, "Local Data", msg)
+                except Exception:
+                    pass
+                try:
+                    set_legacy_import_decision(uid, "imported")
+                except Exception:
+                    pass
+            else:
+                try:
+                    QMessageBox.warning(self, "Local Data", msg)
+                except Exception:
+                    pass
+        else:
+            try:
+                set_legacy_import_decision(uid, "skipped")
+            except Exception:
+                pass
+
     def _is_local_url(self, url):
         try:
+            url = normalize_base_url(url or "")
             parsed = urlparse(url)
             host = parsed.hostname or ""
-            return host in ("127.0.0.1", "localhost")
+            return host in ("127.0.0.1", "localhost", "0.0.0.0")
         except Exception:
             return False
 
     def start_cloud_server(self):
         server_url = self.server_input.text().strip() if hasattr(self, "server_input") else ""
         if not server_url:
-            server_url = "http://127.0.0.1:8000"
+            server_url = get_base_url()
+        server_url = normalize_base_url(server_url or "http://127.0.0.1:8000")
 
         if not self._is_local_url(server_url):
             QMessageBox.information(
@@ -807,7 +941,8 @@ class LoginPage(QWidget):
         else:
             self._apply_server_state(False)
 
-        server_path = os.path.join(os.getcwd(), "server", "main.py")
+        project_root = get_project_root()
+        server_path = os.path.join(project_root, "server", "main.py")
         if not os.path.exists(server_path):
             QMessageBox.warning(self, "Server", "Server entrypoint not found (server/main.py).")
             return
@@ -820,16 +955,28 @@ class LoginPage(QWidget):
                 creationflags = 0
 
         try:
-            subprocess.Popen(
-                [sys.executable, server_path],
-                cwd=os.getcwd(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            parsed = urlparse(server_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 8000
+            if host in ("localhost", "0.0.0.0"):
+                host = "127.0.0.1"
+
+            log_path = os.path.join(project_root, "server", "server.log")
+            start_managed_server(
+                server_path=server_path,
+                cwd=project_root,
+                host=host,
+                port=int(port),
+                log_path=log_path,
+                python_exe=sys.executable,
                 creationflags=creationflags,
             )
             if hasattr(self, "server_status"):
                 self.server_status.setText("Server: starting...")
-            QMessageBox.information(self, "Server", "Server started. Try login again in a few seconds.")
+            msg = "Server started. Try login again in a few seconds."
+            if os.path.exists(log_path):
+                msg += "\n\nLogs: server/server.log"
+            QMessageBox.information(self, "Server", msg)
             self._schedule_server_status_check()
         except Exception as e:
             QMessageBox.warning(self, "Server", f"Could not start server: {e}")
@@ -887,6 +1034,10 @@ class LoginPage(QWidget):
                     self._save_remembered_accounts(accounts)
                     self._render_remembered_users(accounts)
                 self.user_id = user_id
+                try:
+                    self._maybe_offer_legacy_local_db_import(user_id)
+                except Exception:
+                    pass
                 self.login_successful.emit(user_id)
                 return
             QMessageBox.warning(self, "Login Failed", "Invalid username or password.")

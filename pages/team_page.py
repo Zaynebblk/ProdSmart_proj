@@ -4,9 +4,11 @@ import os
 import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QComboBox, QScrollArea, QLineEdit, QDialog, QMessageBox
+    QComboBox, QScrollArea, QLineEdit, QDialog, QMessageBox, QProgressBar,
+    QListWidget, QListWidgetItem, QAbstractItemView, QLayout
 )
 from PyQt6.QtCore import Qt, QDate, pyqtSignal, QTimer
+from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
 from pages.tasks_page import AddTaskDialog, TaskCard, ViewTaskDialog
 from database.db_manager import get_db_connection
 from resources.priority import quadrant_from_flags, normalize_priority
@@ -19,20 +21,724 @@ from resources.api_client import (
     api_create_team,
     api_join_team,
     api_get_team,
+    api_search_users,
+    api_get_user_profile,
+    api_list_team_join_requests,
+    api_accept_team_join_request,
+    api_reject_team_join_request,
+    api_invite_team_member,
+    api_get_user_avatar,
     api_list_team_members,
     api_list_team_tasks,
+    api_team_analytics,
     api_create_team_task,
     api_update_team_task,
     api_delete_team_task,
     api_list_team_messages,
     api_send_team_message,
+    api_update_team_member_role,
+    api_remove_team_member,
+    api_list_team_events,
+    api_list_team_task_comments,
+    api_add_team_task_comment,
     get_base_url,
+    load_settings,
 )
+from pages.user_profile_dialog import UserProfileDialog
+
+
+_NO_AVATAR = object()
 
 
 class NoWheelComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
+
+
+class _TeamTaskDetailsDialog(QDialog):
+    def __init__(
+        self,
+        parent,
+        *,
+        team_id: int,
+        task: dict,
+        priority: str,
+        task_type: str | None,
+        due_pretty: str,
+        created_pretty: str,
+        total_focus_min: int = 0,
+        total_sessions: int = 0,
+        sessions_widgets=None,
+        theme: str = "Light",
+        members_by_id=None,
+    ):
+        super().__init__(parent)
+        self.team_id = int(team_id)
+        self.task = dict(task or {})
+        self.task_id = int(self.task.get("id") or 0)
+        self.current_theme = theme
+        self.members_by_id = dict(members_by_id or {})
+        self.setWindowTitle("Task Details")
+        self.setMinimumWidth(520)
+        if sessions_widgets is None:
+            sessions_widgets = []
+        self.sessions_widgets = list(sessions_widgets)
+
+        c = get_theme(theme)
+        is_dark = theme == "Dark"
+        bg = c["bg"] if not is_dark else c["deep"]
+        txt = c["text"]
+        card_bg = rgba(c["card_alt"], 0.92) if is_dark else rgba(c["card"], 0.95)
+        border = rgba(c["border"], 0.7)
+        self.setStyleSheet(f"QDialog {{ background: {bg}; }} QLabel {{ color: {txt}; }}")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 22, 22, 22)
+        root.setSpacing(12)
+
+        header = QFrame()
+        header.setStyleSheet(f"QFrame {{ background: {card_bg}; border: 1px solid {border}; border-radius: 16px; }}")
+        hl = QVBoxLayout(header)
+        hl.setContentsMargins(16, 14, 16, 14)
+        hl.setSpacing(6)
+
+        title = QLabel(self.task.get("title") or "")
+        title.setWordWrap(True)
+        title.setStyleSheet("font-size: 20px; font-weight: 900;")
+        hl.addWidget(title)
+
+        meta = []
+        if task_type:
+            meta.append(f"Type: {task_type}")
+        if priority:
+            meta.append(f"Priority: {priority}")
+        assigned_to = self.task.get("assigned_to")
+        try:
+            assigned_to = int(assigned_to) if assigned_to is not None else None
+        except Exception:
+            assigned_to = None
+        if assigned_to is not None:
+            assignee_name = self.members_by_id.get(assigned_to) or f"User {assigned_to}"
+            meta.append(f"Assigned to: {assignee_name}")
+        else:
+            meta.append("Unassigned")
+        meta.append(f"Created: {created_pretty}")
+        meta.append(f"Due: {due_pretty}")
+        meta_lbl = QLabel("  •  ".join(meta))
+        meta_lbl.setWordWrap(True)
+        meta_lbl.setStyleSheet(f"font-size: 11px; color: {c['sub']}; font-weight: 600;")
+        hl.addWidget(meta_lbl)
+
+        desc = QLabel(self.task.get("description") or "")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("font-size: 12px; font-weight: 600;")
+        hl.addWidget(desc)
+
+        root.addWidget(header)
+
+        comments_card = QFrame()
+        comments_card.setStyleSheet(f"QFrame {{ background: {card_bg}; border: 1px solid {border}; border-radius: 16px; }}")
+        cl = QVBoxLayout(comments_card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+
+        comments_title = QLabel("Comments")
+        comments_title.setStyleSheet("font-size: 13px; font-weight: 900;")
+        cl.addWidget(comments_title)
+
+        self.comments_list = QVBoxLayout()
+        self.comments_list.setSpacing(10)
+        self.comments_container = QWidget()
+        self.comments_container.setLayout(self.comments_list)
+        self.comments_scroll = QScrollArea()
+        self.comments_scroll.setWidgetResizable(True)
+        self.comments_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.comments_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.comments_scroll.setWidget(self.comments_container)
+        self.comments_scroll.setFixedHeight(220)
+        cl.addWidget(self.comments_scroll)
+
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        self.comment_input = QLineEdit()
+        self.comment_input.setPlaceholderText("Write a comment…")
+        self.comment_input.returnPressed.connect(self.send_comment)
+        self.comment_input.setStyleSheet(
+            f"background: {c['input_bg']}; border: 1px solid {border}; border-radius: 14px; padding: 8px 10px; color: {txt};"
+        )
+        input_row.addWidget(self.comment_input, 1)
+
+        send_btn = QPushButton("Send")
+        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        send_btn.clicked.connect(self.send_comment)
+        input_row.addWidget(send_btn)
+        cl.addLayout(input_row)
+
+        root.addWidget(comments_card)
+
+        if total_sessions is not None:
+            focus_card = QFrame()
+            focus_card.setStyleSheet(f"QFrame {{ background: {card_bg}; border: 1px solid {border}; border-radius: 16px; }}")
+            fl = QVBoxLayout(focus_card)
+            fl.setContentsMargins(16, 14, 16, 14)
+            fl.setSpacing(10)
+            summary = QLabel(f"Focus total: {format_duration_minutes(int(total_focus_min or 0))}  •  Sessions: {int(total_sessions or 0)}")
+            summary.setStyleSheet(f"font-size: 11px; color: {c['sub']}; font-weight: 700;")
+            fl.addWidget(summary)
+            if self.sessions_widgets:
+                for w in self.sessions_widgets[:15]:
+                    fl.addWidget(w)
+            else:
+                empty = QLabel("No Pomodoro sessions yet.")
+                empty.setStyleSheet(f"font-size: 11px; color: {c['sub']};")
+                fl.addWidget(empty)
+            root.addWidget(focus_card)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+        self.refresh_comments()
+
+    def _format_time(self, raw):
+        if not raw:
+            return ""
+        raw_text = str(raw).replace("T", " ").split(".")[0]
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(raw_text, fmt)
+                return dt.strftime("%b %d, %H:%M")
+            except Exception:
+                continue
+        return raw_text
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def refresh_comments(self):
+        if not self.team_id or not self.task_id:
+            return
+        try:
+            res = api_list_team_task_comments(self.team_id, self.task_id, limit=100)
+        except Exception:
+            return
+        comments = res.get("comments", []) if isinstance(res, dict) else []
+        self._clear_layout(self.comments_list)
+        c = get_theme(self.current_theme)
+        for cm in comments:
+            if not isinstance(cm, dict):
+                continue
+            username = cm.get("username") or "User"
+            message = cm.get("message") or ""
+            created_at = cm.get("created_at")
+            bubble = QFrame()
+            bubble.setStyleSheet(
+                f"QFrame {{ background: {rgba(c['card'], 0.7)}; border: 1px solid {rgba(c['border'], 0.5)}; border-radius: 14px; }}"
+            )
+            bl = QVBoxLayout(bubble)
+            bl.setContentsMargins(12, 10, 12, 10)
+            bl.setSpacing(4)
+            head = QHBoxLayout()
+            name = QLabel(str(username).upper())
+            name.setStyleSheet(f"font-size: 9px; font-weight: 800; color: {c['accent']}; letter-spacing: 1px;")
+            head.addWidget(name)
+            head.addStretch()
+            stamp = self._format_time(created_at)
+            if stamp:
+                tl = QLabel(stamp)
+                tl.setStyleSheet(f"font-size: 9px; color: {c['sub']};")
+                head.addWidget(tl)
+            bl.addLayout(head)
+            body = QLabel(str(message))
+            body.setWordWrap(True)
+            body.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {c['text']};")
+            bl.addWidget(body)
+            self.comments_list.addWidget(bubble)
+        self.comments_list.addStretch()
+        try:
+            bar = self.comments_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        except Exception:
+            pass
+
+    def send_comment(self):
+        msg = self.comment_input.text().strip() if hasattr(self, "comment_input") else ""
+        if not msg or not self.team_id or not self.task_id:
+            return
+        try:
+            api_add_team_task_comment(self.team_id, self.task_id, msg)
+            self.comment_input.clear()
+            self.refresh_comments()
+        except ApiError as e:
+            QMessageBox.warning(self, "Comments", str(e))
+        except Exception:
+            pass
+
+
+class _TeamAnalyticsDialog(QDialog):
+    def __init__(self, parent, *, theme: str, team_name: str, data: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Team Analytics")
+        self.setMinimumWidth(560)
+        self.current_theme = theme
+        self.data = dict(data or {})
+
+        c = get_theme(theme)
+        is_dark = theme == "Dark"
+        bg = c["bg"] if not is_dark else c["deep"]
+        card_bg = rgba(c["card_alt"], 0.92) if is_dark else rgba(c["card"], 0.95)
+        border = rgba(c["border"], 0.7)
+        self.setStyleSheet(f"QDialog {{ background: {bg}; }} QLabel {{ color: {c['text']}; }}")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 22, 22, 22)
+        root.setSpacing(12)
+
+        title = QLabel(team_name or "Team")
+        title.setStyleSheet("font-size: 18px; font-weight: 900;")
+        root.addWidget(title)
+
+        tasks = (self.data.get("tasks") or {}) if isinstance(self.data, dict) else {}
+        total = int(tasks.get("total") or 0)
+        completed = int(tasks.get("completed") or 0)
+        active = int(tasks.get("active") or 0)
+        overdue = int(tasks.get("overdue") or 0)
+        rate = float(tasks.get("completion_rate") or 0.0)
+
+        summary = QFrame()
+        summary.setStyleSheet(f"QFrame {{ background: {card_bg}; border: 1px solid {border}; border-radius: 16px; }}")
+        sl = QVBoxLayout(summary)
+        sl.setContentsMargins(16, 14, 16, 14)
+        sl.setSpacing(8)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"Total: {total}"))
+        row.addWidget(QLabel(f"Active: {active}"))
+        row.addWidget(QLabel(f"Completed: {completed}"))
+        row.addWidget(QLabel(f"Overdue: {overdue}"))
+        row.addStretch()
+        sl.addLayout(row)
+
+        bar = QProgressBar()
+        bar.setRange(0, max(1, total))
+        bar.setValue(min(total, completed))
+        bar.setFormat(f"{int(rate * 100)}% complete")
+        bar.setTextVisible(True)
+        bar.setStyleSheet(
+            f"QProgressBar {{ background: {rgba(c['card'], 0.6)}; border: 1px solid {rgba(c['border'], 0.6)}; border-radius: 10px; height: 14px; }}"
+            f"QProgressBar::chunk {{ background: {c['accent']}; border-radius: 10px; }}"
+        )
+        sl.addWidget(bar)
+        root.addWidget(summary)
+
+        members = self.data.get("members") if isinstance(self.data, dict) else {}
+        if not isinstance(members, dict):
+            members = {}
+        sections = [
+            ("Completed Tasks", members.get("completed") or []),
+            ("Created Tasks", members.get("created") or []),
+            ("Active Assignments", members.get("assigned_active") or []),
+            ("Comments", members.get("comments") or []),
+        ]
+
+        for label, rows in sections:
+            if not rows:
+                continue
+            card = QFrame()
+            card.setStyleSheet(f"QFrame {{ background: {card_bg}; border: 1px solid {border}; border-radius: 16px; }}")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(16, 14, 16, 14)
+            cl.setSpacing(8)
+            hdr = QLabel(label)
+            hdr.setStyleSheet("font-size: 13px; font-weight: 900;")
+            cl.addWidget(hdr)
+
+            max_count = 0
+            cleaned = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                name = r.get("username") or "User"
+                count = int(r.get("count") or 0)
+                cleaned.append((str(name), count))
+                max_count = max(max_count, count)
+            max_count = max(1, max_count)
+            for name, count in cleaned[:12]:
+                line = QHBoxLayout()
+                name_lbl = QLabel(name)
+                name_lbl.setStyleSheet(f"color: {c['text']}; font-size: 11px; font-weight: 700;")
+                line.addWidget(name_lbl, 1)
+                count_lbl = QLabel(str(count))
+                count_lbl.setStyleSheet(f"color: {c['sub']}; font-size: 11px; font-weight: 800;")
+                line.addWidget(count_lbl)
+                cl.addLayout(line)
+
+                pb = QProgressBar()
+                pb.setRange(0, max_count)
+                pb.setValue(count)
+                pb.setTextVisible(False)
+                pb.setFixedHeight(10)
+                pb.setStyleSheet(
+                    f"QProgressBar {{ background: {rgba(c['card'], 0.5)}; border: 1px solid {rgba(c['border'], 0.4)}; border-radius: 6px; }}"
+                    f"QProgressBar::chunk {{ background: {rgba(c['accent'], 0.85)}; border-radius: 6px; }}"
+                )
+                cl.addWidget(pb)
+            root.addWidget(card)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+
+class _TeamJoinRequestsDialog(QDialog):
+    def __init__(self, parent, *, team_id: int, theme: str = "Light", on_members_changed=None):
+        super().__init__(parent)
+        self.team_id = int(team_id)
+        self.current_theme = theme
+        self._on_members_changed = on_members_changed
+        self.setWindowTitle("Access Requests")
+        self.setMinimumWidth(520)
+
+        c = get_theme(theme)
+        is_dark = theme == "Dark"
+        bg = c["bg"] if not is_dark else c["deep"]
+        card_bg = rgba(c["card_alt"], 0.92) if is_dark else rgba(c["card"], 0.95)
+        border = rgba(c["border"], 0.7)
+        self._card_bg = card_bg
+        self._border = border
+        self.setStyleSheet(f"QDialog {{ background: {bg}; }} QLabel {{ color: {c['text']}; }}")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 22, 22, 22)
+        root.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("Pending access requests")
+        title.setStyleSheet("font-size: 16px; font-weight: 900;")
+        header.addWidget(title)
+        header.addStretch()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.clicked.connect(self.refresh)
+        header.addWidget(refresh_btn)
+        root.addLayout(header)
+
+        self.list_layout = QVBoxLayout()
+        self.list_layout.setSpacing(10)
+        self.list_container = QWidget()
+        self.list_container.setLayout(self.list_layout)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.scroll.setWidget(self.list_container)
+        self.scroll.setFixedHeight(320)
+        root.addWidget(self.scroll)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+        self.refresh()
+
+    def _clear_list(self):
+        while self.list_layout.count():
+            item = self.list_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget:
+                self.list_layout.removeWidget(widget)
+                widget.deleteLater()
+
+    def refresh(self):
+        self._clear_list()
+        try:
+            res = api_list_team_join_requests(self.team_id)
+        except ApiError as e:
+            msg = QLabel(str(e))
+            msg.setStyleSheet("font-size: 11px; font-weight: 700;")
+            self.list_layout.addWidget(msg)
+            return
+        except Exception:
+            msg = QLabel("Failed to load requests.")
+            msg.setStyleSheet("font-size: 11px; font-weight: 700;")
+            self.list_layout.addWidget(msg)
+            return
+
+        requests = res.get("requests", []) if isinstance(res, dict) else []
+        if not requests:
+            empty = QLabel("No pending requests.")
+            empty.setStyleSheet("font-size: 11px; font-weight: 700;")
+            self.list_layout.addWidget(empty)
+            return
+
+        for req in requests:
+            if not isinstance(req, dict):
+                continue
+            try:
+                req_id = int(req.get("id") or 0)
+            except Exception:
+                req_id = 0
+            if req_id <= 0:
+                continue
+            username = req.get("username") or "User"
+            created_at = str(req.get("created_at") or "").split(".")[0].replace("T", " ")
+            if created_at:
+                subtitle = f"{username}  \u2022  {created_at}"
+            else:
+                subtitle = str(username)
+
+            card = QFrame()
+            card.setStyleSheet(f"QFrame {{ background: {self._card_bg}; border: 1px solid {self._border}; border-radius: 16px; }}")
+            layout = QHBoxLayout(card)
+            layout.setContentsMargins(14, 12, 14, 12)
+            layout.setSpacing(10)
+
+            text = QLabel(subtitle)
+            text.setStyleSheet("font-size: 12px; font-weight: 800;")
+            layout.addWidget(text, 1)
+
+            btn_reject = QPushButton("Reject")
+            btn_reject.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_reject.clicked.connect(lambda _=False, rid=req_id: self._decide(rid, accept=False))
+            layout.addWidget(btn_reject)
+
+            btn_accept = QPushButton("Accept")
+            btn_accept.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_accept.clicked.connect(lambda _=False, rid=req_id: self._decide(rid, accept=True))
+            layout.addWidget(btn_accept)
+
+            self.list_layout.addWidget(card)
+
+    def _decide(self, request_id: int, *, accept: bool):
+        try:
+            if accept:
+                api_accept_team_join_request(self.team_id, int(request_id))
+            else:
+                api_reject_team_join_request(self.team_id, int(request_id))
+        except ApiError as e:
+            QMessageBox.warning(self, "Access Requests", str(e))
+            return
+        except Exception:
+            return
+        try:
+            if callable(self._on_members_changed):
+                self._on_members_changed()
+        except Exception:
+            pass
+        self.refresh()
+
+
+class _TeamInviteDialog(QDialog):
+    def __init__(
+        self,
+        parent,
+        *,
+        team_id: int,
+        theme: str = "Light",
+        existing_member_ids=None,
+        current_user_id: int | None = None,
+        on_members_changed=None,
+    ):
+        super().__init__(parent)
+        self.team_id = int(team_id)
+        self.current_theme = theme
+        self._existing_member_ids = set(existing_member_ids or set())
+        self._current_user_id = int(current_user_id) if current_user_id is not None else None
+        self._on_members_changed = on_members_changed
+        self.setWindowTitle("Invite Member")
+        self.setMinimumWidth(520)
+
+        c = get_theme(theme)
+        is_dark = theme == "Dark"
+        bg = c["bg"] if not is_dark else c["deep"]
+        txt = c["text"]
+        card_bg = rgba(c["card_alt"], 0.92) if is_dark else rgba(c["card"], 0.95)
+        border = rgba(c["border"], 0.7)
+        self._border = border
+        self.setStyleSheet(f"QDialog {{ background: {bg}; }} QLabel {{ color: {txt}; }}")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 22, 22, 22)
+        root.setSpacing(12)
+
+        title = QLabel("Search accounts")
+        title.setStyleSheet("font-size: 16px; font-weight: 900;")
+        root.addWidget(title)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Type a username\u2026")
+        self.search_input.setStyleSheet(
+            f"background: {c['input_bg']}; border: 1px solid {border}; border-radius: 14px; padding: 10px 12px; color: {txt};"
+        )
+        self.search_input.textChanged.connect(self._queue_search)
+        root.addWidget(self.search_input)
+
+        self.results = QListWidget()
+        self.results.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.results.setStyleSheet(
+            f"QListWidget {{ background: transparent; border: 0; color: {txt}; }} "
+            f"QListWidget::item {{ background: {card_bg}; border: 1px solid {border}; border-radius: 14px; padding: 10px 12px; }} "
+            f"QListWidget::item:selected {{ background: rgba(48, 120, 205, 40); border: 1px solid #82AFF2; }}"
+        )
+        self.results.itemSelectionChanged.connect(self._sync_invite_button)
+        self.results.itemDoubleClicked.connect(lambda _item: self._invite_selected())
+        root.addWidget(self.results)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        self.invite_btn = QPushButton("Invite")
+        self.invite_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.invite_btn.setEnabled(False)
+        self.invite_btn.clicked.connect(self._invite_selected)
+        btn_row.addWidget(self.invite_btn)
+        root.addLayout(btn_row)
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._do_search)
+
+        self.search_input.setFocus()
+        self._render_hint("Start typing to search.")
+
+    def _render_hint(self, text: str):
+        self.results.clear()
+        item = QListWidgetItem(str(text))
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.results.addItem(item)
+        self.invite_btn.setEnabled(False)
+
+    def _queue_search(self, _text):
+        try:
+            self._search_timer.start(220)
+        except Exception:
+            self._do_search()
+
+    def _do_search(self):
+        query = self.search_input.text().strip()
+        if not query:
+            self._render_hint("Start typing to search.")
+            return
+        if len(query) < 2:
+            self._render_hint("Type at least 2 characters.")
+            return
+        try:
+            res = api_search_users(query, limit=15)
+        except ApiError as e:
+            self._render_hint(str(e))
+            return
+        except Exception:
+            self._render_hint("Search failed.")
+            return
+
+        users = res.get("users", []) if isinstance(res, dict) else []
+        self.results.clear()
+        any_selectable = False
+        for u in users:
+            if not isinstance(u, dict):
+                continue
+            try:
+                user_id = int(u.get("user_id") or 0)
+            except Exception:
+                user_id = 0
+            username = str(u.get("username") or "").strip()
+            if not user_id or not username:
+                continue
+
+            label = username
+            selectable = True
+            if self._current_user_id is not None and user_id == self._current_user_id:
+                label = f"{username} (you)"
+                selectable = False
+            elif user_id in self._existing_member_ids:
+                label = f"{username} (already in team)"
+                selectable = False
+
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, {"user_id": user_id, "username": username})
+            if not selectable:
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+            else:
+                any_selectable = True
+            self.results.addItem(item)
+
+        if self.results.count() == 0:
+            self._render_hint("No results.")
+            return
+        if any_selectable:
+            self._select_first_selectable()
+        self._sync_invite_button()
+
+    def _select_first_selectable(self):
+        for i in range(self.results.count()):
+            item = self.results.item(i)
+            if item and bool(item.flags() & Qt.ItemFlag.ItemIsSelectable):
+                self.results.setCurrentRow(i)
+                return
+
+    def _selected_user(self):
+        try:
+            item = self.results.currentItem()
+        except Exception:
+            item = None
+        if not item:
+            return None
+        if not bool(item.flags() & Qt.ItemFlag.ItemIsSelectable):
+            return None
+        try:
+            data = item.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            return None
+        username = str(data.get("username") or "").strip()
+        if not username:
+            return None
+        return data
+
+    def _sync_invite_button(self):
+        self.invite_btn.setEnabled(bool(self._selected_user()))
+
+    def _invite_selected(self):
+        user = self._selected_user()
+        if not user:
+            return
+        username = str(user.get("username") or "").strip()
+        if not username:
+            return
+        try:
+            api_invite_team_member(self.team_id, username)
+        except ApiError as e:
+            QMessageBox.warning(self, "Invite Member", str(e))
+            return
+        except Exception:
+            return
+        try:
+            if callable(self._on_members_changed):
+                self._on_members_changed()
+        except Exception:
+            pass
+        self.accept()
 
 
 class TeamPage(QWidget):
@@ -45,10 +751,37 @@ class TeamPage(QWidget):
         self.current_theme = "Light"
         self.current_team_id = None
         self.team_meta = {}
+        self._current_role = "member"
         self._tasks_cache = {}
+        self._members_by_id = {}
+        self._member_role_by_id = {}
+        self._avatar_pixmap_by_user_id = {}
+        self._last_event_id_by_team = {}
         self.chat_timer = QTimer()
         self.chat_timer.timeout.connect(self.refresh_chat)
+        self.events_timer = QTimer()
+        self.events_timer.timeout.connect(self.refresh_events)
         self._build_ui()
+
+    def _open_user_profile(self, user_id: int):
+        try:
+            uid = int(user_id)
+        except Exception:
+            return
+        if uid <= 0:
+            return
+        try:
+            prof = api_get_user_profile(uid)
+        except ApiError as e:
+            prof = {"user_id": uid, "username": f"User {uid}", "bio": str(e)}
+        except Exception:
+            prof = {"user_id": uid, "username": f"User {uid}", "bio": "Could not load profile."}
+
+        dlg = UserProfileDialog(self, theme=self.current_theme, profile=prof if isinstance(prof, dict) else {})
+        try:
+            dlg.exec()
+        except Exception:
+            pass
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -92,9 +825,13 @@ class TeamPage(QWidget):
         self.btn_create.clicked.connect(self.create_team)
         bar_layout.addWidget(self.btn_create)
 
-        self.btn_join = QPushButton("Join Team")
+        self.btn_join = QPushButton("Request Access")
         self.btn_join.clicked.connect(self.join_team)
         bar_layout.addWidget(self.btn_join)
+
+        self.btn_analytics = QPushButton("Analytics")
+        self.btn_analytics.clicked.connect(self.open_analytics)
+        bar_layout.addWidget(self.btn_analytics)
 
         layout.addWidget(team_bar)
 
@@ -116,11 +853,27 @@ class TeamPage(QWidget):
         members_header.addWidget(self.members_title)
         members_header.addStretch()
         members_header.addWidget(self.members_count)
+
+        self.btn_access_requests = QPushButton("Requests")
+        self.btn_access_requests.clicked.connect(self.open_join_requests)
+        members_header.addWidget(self.btn_access_requests)
+
+        self.btn_invite_member = QPushButton("Invite")
+        self.btn_invite_member.clicked.connect(self.invite_member)
+        members_header.addWidget(self.btn_invite_member)
+
+        self.btn_access_requests.setVisible(False)
+        self.btn_invite_member.setVisible(False)
         members_layout.addLayout(members_header)
 
-        self.members_list = QVBoxLayout()
-        self.members_list.setSpacing(10)
+        self.members_list = QHBoxLayout()
+        self.members_list.setSpacing(12)
         self.members_list.setContentsMargins(2, 2, 2, 2)
+        self.members_list.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        try:
+            self.members_list.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        except Exception:
+            pass
 
         self.members_container = QWidget()
         self.members_container.setLayout(self.members_list)
@@ -128,8 +881,10 @@ class TeamPage(QWidget):
         self.members_scroll.setWidgetResizable(True)
         self.members_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.members_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.members_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.members_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.members_scroll.setWidget(self.members_container)
-        self.members_scroll.setFixedHeight(240)
+        self.members_scroll.setFixedHeight(148)
         members_layout.addWidget(self.members_scroll)
 
         self.members_empty = QLabel("No members yet.")
@@ -138,12 +893,13 @@ class TeamPage(QWidget):
 
         self.chat_card = QFrame()
         self.chat_card.setObjectName("TeamChatCard")
+        self.chat_card.setMinimumWidth(560)
         chat_layout = QVBoxLayout(self.chat_card)
         chat_layout.setContentsMargins(16, 14, 16, 14)
         chat_layout.setSpacing(12)
 
         chat_header = QHBoxLayout()
-        self.chat_title = QLabel("Team Chat")
+        self.chat_title = QLabel("#team-workspace")
         self.chat_title.setObjectName("TeamChatTitle")
         self.chat_hint = QLabel("")
         self.chat_hint.setObjectName("TeamChatHint")
@@ -164,7 +920,7 @@ class TeamPage(QWidget):
         self.chat_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.chat_scroll.setStyleSheet("QScrollArea { background: transparent; }")
         self.chat_scroll.setWidget(self.chat_container)
-        self.chat_scroll.setFixedHeight(300)
+        self.chat_scroll.setFixedHeight(452)
         chat_layout.addWidget(self.chat_scroll)
 
         self.chat_empty = QLabel("No messages yet.")
@@ -182,7 +938,7 @@ class TeamPage(QWidget):
 
         self.chat_input = QLineEdit()
         self.chat_input.setObjectName("TeamChatInput")
-        self.chat_input.setPlaceholderText("Message the team...")
+        self.chat_input.setPlaceholderText("Message #team-workspace...")
         self.chat_input.setFixedHeight(32)
         self.chat_input.setFrame(False)
         self.chat_input.returnPressed.connect(self.send_chat_message)
@@ -197,17 +953,28 @@ class TeamPage(QWidget):
         chat_input_row.addWidget(self.chat_send_btn)
         chat_layout.addLayout(chat_input_row)
         layout.addWidget(self.members_card)
-        layout.addWidget(self.chat_card)
+
+        main_row = QHBoxLayout()
+        main_row.setSpacing(18)
+        layout.addLayout(main_row)
+        main_row.addWidget(self.chat_card, 3)
+
+        self.recent_tasks_card = QFrame()
+        self.recent_tasks_card.setObjectName("TeamRecentTasksCard")
+        self.recent_tasks_card.setMinimumWidth(360)
+        recent_layout = QVBoxLayout(self.recent_tasks_card)
+        recent_layout.setContentsMargins(16, 14, 16, 14)
+        recent_layout.setSpacing(12)
 
         tasks_header = QHBoxLayout()
-        self.tasks_title = QLabel("Team Tasks")
-        self.tasks_title.setObjectName("TeamSectionTitle")
+        self.tasks_title = QLabel("Recent Tasks")
+        self.tasks_title.setObjectName("TeamRecentTasksTitle")
         tasks_header.addWidget(self.tasks_title)
         tasks_header.addStretch()
         self.btn_add_task = QPushButton("Add Task")
         self.btn_add_task.clicked.connect(self.add_task)
         tasks_header.addWidget(self.btn_add_task)
-        layout.addLayout(tasks_header)
+        recent_layout.addLayout(tasks_header)
 
         self.tasks_container = QWidget()
         self.tasks_layout = QVBoxLayout(self.tasks_container)
@@ -215,11 +982,19 @@ class TeamPage(QWidget):
         self.tasks_layout.setSpacing(14)
         self.tasks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        layout.addWidget(self.tasks_container)
+        self.recent_tasks_scroll = QScrollArea()
+        self.recent_tasks_scroll.setWidgetResizable(True)
+        self.recent_tasks_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.recent_tasks_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.recent_tasks_scroll.setWidget(self.tasks_container)
+        self.recent_tasks_scroll.setFixedHeight(452)
+        recent_layout.addWidget(self.recent_tasks_scroll)
 
         self.empty_label = QLabel("No team tasks yet.")
         self.empty_label.setObjectName("TeamEmpty")
         self.tasks_layout.addWidget(self.empty_label)
+
+        main_row.addWidget(self.recent_tasks_card, 2)
 
     def update_theme(self, theme):
         self.current_theme = theme
@@ -234,11 +1009,13 @@ class TeamPage(QWidget):
             f"QPushButton:hover {{ background: {c['deep']}; }}"
             f"QLabel#TeamJoinCode {{ color: {c['sub']}; font-weight: 600; }}"
             f"QLabel#TeamSectionTitle {{ color: {c['text']}; font-size: 18px; font-weight: 800; }}"
+            f"QLabel#TeamRecentTasksTitle {{ color: {c['text']}; font-size: 14px; font-weight: 900; }}"
             f"QLabel#TeamEmpty {{ color: {c['sub']}; font-size: 12px; }}"
-            f"QFrame#TeamMembersCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 18px; }}"
-            f"QFrame#TeamChatCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 18px; }}"
+            f"QFrame#TeamMembersCard {{ background: transparent; border: none; }}"
+            f"QFrame#TeamChatCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 20px; }}"
+            f"QFrame#TeamRecentTasksCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 20px; }}"
             f"QLabel#TeamMembersTitle {{ color: {c['text']}; font-size: 14px; font-weight: 800; }}"
-            f"QLabel#TeamChatTitle {{ color: {c['text']}; font-size: 14px; font-weight: 800; }}"
+            f"QLabel#TeamChatTitle {{ color: {c['text']}; font-size: 14px; font-weight: 900; }}"
             f"QLabel#TeamMembersCount {{ background: transparent; color: {c['sub']}; padding: 2px 2px; font-size: 10px; font-weight: 800; }}"
             f"QLabel#TeamChatHint {{ background: {rgba(c['accent'], 0.2)}; color: {c['accent']}; border-radius: 10px; padding: 2px 8px; font-size: 9px; font-weight: 800; }}"
             f"QFrame#TeamChatInputCard {{ background: {rgba(c['card_alt'], 0.85)}; border: 1px solid {rgba(c['border'], 0.7)}; border-radius: 22px; }}"
@@ -291,22 +1068,59 @@ class TeamPage(QWidget):
             self._render_tasks([])
             self._render_members([])
             self._render_chat([])
+            try:
+                self.chat_title.setText("#team-workspace")
+                self.chat_input.setPlaceholderText("Message #team-workspace...")
+            except Exception:
+                pass
+            self._current_role = "member"
+            self._update_admin_controls()
             if self.chat_timer.isActive():
                 self.chat_timer.stop()
+            if self.events_timer.isActive():
+                self.events_timer.stop()
             return
         try:
             info = api_get_team(team_id)
             join_code = info.get("join_code") if isinstance(info, dict) else None
+            role = info.get("role") if isinstance(info, dict) else None
+            self._current_role = str(role or "member").strip().lower() or "member"
             if join_code:
                 self.join_code_label.setText(f"Join code: {join_code}")
             else:
                 self.join_code_label.setText("Join code: -")
         except ApiError:
             self.join_code_label.setText("Join code: -")
+            self._current_role = "member"
+
+        try:
+            raw_name = str(self.team_combo.currentText() or "team-workspace").strip()
+            slug = re.sub(r"[^a-z0-9]+", "-", raw_name.strip().lower()).strip("-") or "team-workspace"
+            channel = f"#{slug}"
+            self.chat_title.setText(channel)
+            self.chat_input.setPlaceholderText(f"Message {channel}...")
+        except Exception:
+            pass
+        self._update_admin_controls()
         self.refresh_members()
         self.refresh_chat()
         if not self.chat_timer.isActive():
             self.chat_timer.start(5000)
+        if not self.events_timer.isActive():
+            self.events_timer.start(2500)
+        # Prime event cursor so we don't replay old events on first poll.
+        try:
+            res = api_list_team_events(team_id, after_id=0, limit=200)
+            events = res.get("events", []) if isinstance(res, dict) else []
+            max_id = 0
+            for ev in events:
+                try:
+                    max_id = max(max_id, int((ev or {}).get("id") or 0))
+                except Exception:
+                    pass
+            self._last_event_id_by_team[int(team_id)] = int(max_id or 0)
+        except Exception:
+            self._last_event_id_by_team[int(team_id)] = int((self._last_event_id_by_team or {}).get(int(team_id), 0) or 0)
         self.refresh_tasks()
 
     def refresh_tasks(self):
@@ -333,6 +1147,22 @@ class TeamPage(QWidget):
             QMessageBox.warning(self, "Team Members", str(e))
             return
         members = res.get("members", []) if isinstance(res, dict) else []
+        # Avoid caching "no avatar" forever: allow newly uploaded avatars to appear without restart.
+        self._avatar_pixmap_by_user_id = {}
+        by_id = {}
+        role_by_id = {}
+        for m in members:
+            if not isinstance(m, dict):
+                continue
+            uid = m.get("user_id")
+            uname = m.get("username")
+            role = m.get("role")
+            if uid is None:
+                continue
+            by_id[int(uid)] = str(uname or "").strip() or f"User {uid}"
+            role_by_id[int(uid)] = str(role or "member").strip().lower() or "member"
+        self._members_by_id = by_id
+        self._member_role_by_id = role_by_id
         self._render_members(members)
 
     def refresh_chat(self):
@@ -347,6 +1177,60 @@ class TeamPage(QWidget):
             return
         messages = res.get("messages", []) if isinstance(res, dict) else []
         self._render_chat(messages)
+
+    def refresh_events(self):
+        if not self.current_team_id:
+            return
+        team_id = int(self.current_team_id)
+        last_id = int((self._last_event_id_by_team or {}).get(team_id, 0) or 0)
+        try:
+            res = api_list_team_events(team_id, after_id=last_id, limit=50)
+        except Exception:
+            return
+        events = res.get("events", []) if isinstance(res, dict) else []
+        if not events:
+            return
+        refresh_tasks = False
+        refresh_members = False
+        refresh_chat = False
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            try:
+                ev_id = int(ev.get("id") or 0)
+            except Exception:
+                ev_id = 0
+            if ev_id > last_id:
+                last_id = ev_id
+            et = str(ev.get("event_type") or "").strip()
+            if et in ("task_created", "task_updated", "task_deleted"):
+                refresh_tasks = True
+            elif et in ("member_role_updated", "member_added"):
+                refresh_members = True
+            elif et in ("member_removed",):
+                refresh_members = True
+                refresh_tasks = True
+            elif et in ("team_message",):
+                refresh_chat = True
+            elif et in ("task_comment",):
+                # Comments are shown inside the task dialog; keep the main list fresh.
+                refresh_tasks = True
+        self._last_event_id_by_team[team_id] = last_id
+        if refresh_members:
+            try:
+                self.refresh_members()
+            except Exception:
+                pass
+        if refresh_tasks:
+            try:
+                self.refresh_tasks()
+            except Exception:
+                pass
+        if refresh_chat:
+            try:
+                self.refresh_chat()
+            except Exception:
+                pass
 
     def pause_network(self):
         if self.chat_timer.isActive():
@@ -398,15 +1282,96 @@ class TeamPage(QWidget):
                     self.tasks_layout.addWidget(card)
 
     def _current_username(self):
-        settings_path = os.path.join(os.getcwd(), "settings.json")
         try:
-            if os.path.exists(settings_path):
-                with open(settings_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data.get("cloud_username")
+            data = load_settings()
+            username = data.get("cloud_username") if isinstance(data, dict) else None
+            username = str(username or "").strip()
+            return username or None
         except Exception:
             return None
         return None
+
+    def _current_user_id(self):
+        try:
+            data = load_settings()
+            uid = data.get("cloud_user_id") if isinstance(data, dict) else None
+            return int(uid) if uid is not None else None
+        except Exception:
+            return None
+
+    def _role_rank(self, role):
+        ranks = {"member": 0, "manager": 1, "admin": 2, "owner": 3}
+        try:
+            return int(ranks.get(str(role or "").strip().lower(), 0))
+        except Exception:
+            return 0
+
+    def _can_manage_roles(self):
+        return str(self._current_role or "").strip().lower() == "owner"
+
+    def _can_assign_tasks(self):
+        return str(self._current_role or "").strip().lower() == "owner"
+
+    def _is_team_admin(self):
+        return str(self._current_role or "").strip().lower() == "owner"
+
+    def _update_admin_controls(self):
+        is_admin = bool(self.current_team_id) and self._is_team_admin()
+        for attr in ("btn_access_requests", "btn_invite_member"):
+            btn = getattr(self, attr, None)
+            if not btn:
+                continue
+            try:
+                btn.setVisible(bool(is_admin))
+            except Exception:
+                pass
+
+    def _set_member_role(self, user_id: int, new_role: str):
+        if not self.current_team_id:
+            return
+        role = str(new_role or "").strip().lower()
+        if role not in ("member", "manager"):
+            return
+        try:
+            api_update_team_member_role(self.current_team_id, int(user_id), role)
+        except ApiError as e:
+            QMessageBox.warning(self, "Roles", str(e))
+        except Exception:
+            pass
+        self.refresh_members()
+
+    def _remove_member(self, user_id: int, username: str | None = None):
+        if not self.current_team_id:
+            return
+        if not self._is_team_admin():
+            QMessageBox.information(self, "Remove Member", "Only the team admin can remove members.")
+            return
+        try:
+            uid = int(user_id)
+        except Exception:
+            return
+        me = self._current_user_id()
+        if me is not None and uid == int(me):
+            QMessageBox.information(self, "Remove Member", "Admin cannot remove themselves.")
+            return
+        uname = str(username or "").strip() or f"User {uid}"
+        confirm = QMessageBox.question(
+            self,
+            "Remove Member",
+            f"Remove {uname} from this team?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            api_remove_team_member(int(self.current_team_id), uid)
+        except ApiError as e:
+            QMessageBox.warning(self, "Remove Member", str(e))
+            return
+        except Exception:
+            return
+        self.refresh_members()
+        self.refresh_tasks()
 
     def _member_avatar_colors(self, username):
         c = get_theme(self.current_theme)
@@ -415,49 +1380,131 @@ class TeamPage(QWidget):
         base = palette[key]
         return rgba(base, 0.22), base
 
-    def _build_member_card(self, username, role):
+    def _circle_pixmap(self, source: QPixmap, size: int) -> QPixmap | None:
+        try:
+            size_i = int(size)
+        except Exception:
+            size_i = 46
+        size_i = max(8, size_i)
+        if source is None or source.isNull():
+            return None
+        try:
+            scaled = source.scaled(
+                size_i,
+                size_i,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        except Exception:
+            scaled = source
+        result = QPixmap(size_i, size_i)
+        result.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(result)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        except Exception:
+            pass
+        path = QPainterPath()
+        path.addEllipse(0, 0, size_i, size_i)
+        painter.setClipPath(path)
+        try:
+            dx = int((scaled.width() - size_i) / 2)
+            dy = int((scaled.height() - size_i) / 2)
+        except Exception:
+            dx, dy = 0, 0
+        painter.drawPixmap(-dx, -dy, scaled)
+        painter.end()
+        return result
+
+    def _get_avatar_pixmap_for_user(self, user_id: int, *, size: int = 46) -> QPixmap | None:
+        try:
+            uid = int(user_id)
+        except Exception:
+            return None
+        if uid <= 0:
+            return None
+        cached = (self._avatar_pixmap_by_user_id or {}).get(uid, None)
+        if cached is _NO_AVATAR:
+            return None
+        if isinstance(cached, QPixmap) and not cached.isNull():
+            return cached
+
+        data = None
+        try:
+            data = api_get_user_avatar(uid)
+        except ApiError:
+            data = None
+        except Exception:
+            data = None
+
+        if not data:
+            self._avatar_pixmap_by_user_id[uid] = _NO_AVATAR
+            return None
+        pixmap = QPixmap()
+        try:
+            ok = pixmap.loadFromData(data)
+        except Exception:
+            ok = False
+        if not ok or pixmap.isNull():
+            self._avatar_pixmap_by_user_id[uid] = _NO_AVATAR
+            return None
+        circle = self._circle_pixmap(pixmap, size)
+        if circle is None or circle.isNull():
+            self._avatar_pixmap_by_user_id[uid] = _NO_AVATAR
+            return None
+        self._avatar_pixmap_by_user_id[uid] = circle
+        return circle
+
+    def _build_member_card(self, user_id, username, role):
         c = get_theme(self.current_theme)
         card = QFrame()
+        card.setObjectName("TeamMemberCard")
+        card.setFixedWidth(228)
+        card.setMinimumHeight(132)
         card.setStyleSheet(
-            f"QFrame {{ background: {c['card']}; border: 1px solid {rgba(c['border'], 0.6)}; border-radius: 16px; }}"
+            f"QFrame#TeamMemberCard {{ background: {rgba(c['card_alt'], 0.92)}; border: 1px solid {rgba(c['border'], 0.65)}; border-radius: 18px; }}"
+            f"QFrame#TeamMemberCard:hover {{ border: 1px solid {rgba(c['accent'], 0.6)}; }}"
         )
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(12)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
 
         initials = "".join([part[:1] for part in re.split(r"[^A-Za-z0-9]+", username or "") if part])[:2].upper()
         if not initials:
             initials = "U"
-        if (role or "").lower() == "owner":
-            avatar_bg = rgba(c["accent"], 0.28)
-            avatar_fg = c["accent"]
-        else:
-            avatar_bg = rgba(c["chip_text"], 0.2)
-            avatar_fg = c["text"]
-        avatar = QLabel(initials)
+        r = str(role or "member").strip().lower() or "member"
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+
+        avatar = QLabel()
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setFixedSize(44, 44)
-        avatar.setStyleSheet(
-            f"background: {avatar_bg}; color: {avatar_fg}; border-radius: 20px; font-weight: 800;"
-        )
-        layout.addWidget(avatar)
+        avatar.setFixedSize(46, 46)
+        avatar.setCursor(Qt.CursorShape.PointingHandCursor)
+        avatar_pix = self._get_avatar_pixmap_for_user(user_id, size=46) if user_id is not None else None
+        if avatar_pix is not None and not avatar_pix.isNull():
+            avatar.setPixmap(avatar_pix)
+            avatar.setStyleSheet("background: transparent; border-radius: 23px;")
+        else:
+            avatar_bg, avatar_fg = self._member_avatar_colors(username)
+            avatar.setText(initials)
+            avatar.setStyleSheet(
+                f"background: {avatar_bg}; color: {avatar_fg}; border-radius: 23px; font-weight: 900; font-size: 14px;"
+            )
+        top.addWidget(avatar)
+        top.addStretch()
 
-        name_col = QVBoxLayout()
-        name_col.setSpacing(2)
-        name = QLabel(username or "Unknown")
-        name.setStyleSheet(f"font-size: 12px; font-weight: 800; color: {c['text']};")
-        role_text = "Lead Designer" if (role or "").lower() == "owner" else "Team Member"
-        subtitle = QLabel(role_text)
-        subtitle.setStyleSheet(f"font-size: 10px; color: {c['sub']}; font-weight: 600;")
-        name_col.addWidget(name)
-        name_col.addWidget(subtitle)
-        layout.addLayout(name_col)
-        layout.addStretch()
-
-        badge_text = (role or "member").upper()
-        if (role or "").lower() == "owner":
+        badge_text = ("admin" if r == "owner" else r).upper()
+        if r == "owner":
             badge_bg = rgba(c["accent"], 0.22)
             badge_fg = c["accent"]
+        elif r == "admin":
+            badge_bg = rgba(c["accent2"], 0.18)
+            badge_fg = c["accent2"]
+        elif r == "manager":
+            badge_bg = rgba(c["chip"], 0.18)
+            badge_fg = c["chip_text"]
         else:
             badge_bg = rgba(c["chip_text"], 0.18)
             badge_fg = c["sub"]
@@ -466,7 +1513,62 @@ class TeamPage(QWidget):
             f"background: {badge_bg}; color: {badge_fg}; border-radius: 10px; padding: 2px 10px; "
             f"font-size: 9px; font-weight: 800; letter-spacing: 1px;"
         )
-        layout.addWidget(badge)
+        top.addWidget(badge)
+        layout.addLayout(top)
+
+        name = QLabel(username or "Unknown")
+        name.setStyleSheet(f"font-size: 12px; font-weight: 900; color: {c['text']};")
+        name.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(name)
+
+        role_text = {"owner": "Admin", "admin": "Admin", "manager": "Manager", "member": "Member"}.get(r, "Member")
+        subtitle = QLabel(role_text)
+        subtitle.setStyleSheet(f"font-size: 10px; color: {c['sub']}; font-weight: 650;")
+        layout.addWidget(subtitle)
+        layout.addStretch()
+
+        # Open member profile when clicking avatar/name.
+        if user_id is not None:
+            try:
+                uid_int = int(user_id)
+            except Exception:
+                uid_int = 0
+            if uid_int > 0:
+                try:
+                    avatar.mousePressEvent = lambda _e, uid=uid_int: self._open_user_profile(uid)
+                    name.mousePressEvent = lambda _e, uid=uid_int: self._open_user_profile(uid)
+                except Exception:
+                    pass
+
+        if self._can_manage_roles() and r != "owner" and user_id is not None:
+            actions = QHBoxLayout()
+            actions.setSpacing(8)
+
+            role_combo = NoWheelComboBox()
+            role_combo.setMinimumHeight(28)
+            role_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+            role_combo.addItem("member")
+            role_combo.addItem("manager")
+            role_combo.setCurrentText(r if r in ("member", "manager") else "member")
+            role_combo.currentTextChanged.connect(lambda new_r, uid=int(user_id): self._set_member_role(uid, new_r))
+            role_combo.setStyleSheet(
+                f"QComboBox {{ background: {c['input_bg']}; border: 1px solid {rgba(c['border'], 0.8)}; border-radius: 10px; padding: 4px 8px; color: {c['text']}; }}"
+            )
+            actions.addWidget(role_combo, 1)
+
+            if self._is_team_admin() and r != "owner":
+                remove_btn = QPushButton("Remove")
+                remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                remove_btn.setMinimumHeight(28)
+                remove_btn.setStyleSheet(
+                    "QPushButton { background-color: #ef4444; border: 1px solid #b91c1c; color: white; "
+                    "border-radius: 10px; font-weight: 900; font-size: 10px; padding: 0px 12px; }"
+                    "QPushButton:hover { background-color: #b91c1c; border-color: #7f1d1d; }"
+                )
+                remove_btn.clicked.connect(lambda _=False, uid=int(user_id), uname=str(username or ""): self._remove_member(uid, uname))
+                actions.addWidget(remove_btn)
+
+            layout.addLayout(actions)
         return card
 
     def _render_members(self, members):
@@ -495,7 +1597,8 @@ class TeamPage(QWidget):
         for m in members:
             username = m.get("username") if isinstance(m, dict) else None
             role = m.get("role") if isinstance(m, dict) else None
-            card = self._build_member_card(username, role)
+            user_id = m.get("user_id") if isinstance(m, dict) else None
+            card = self._build_member_card(user_id, username, role)
             self.members_list.addWidget(card)
 
     def _render_chat(self, messages):
@@ -542,13 +1645,17 @@ class TeamPage(QWidget):
 
             bubble = QFrame()
             if is_own:
-                bubble_bg = c["card"]
-                border = rgba(c["border"], 0.7)
+                bubble_bg = c["primary_gradient"]
+                border = rgba(c["accent2"], 0.55)
+                body_color = "white"
+                time_color = rgba("#FFFFFF", 0.75)
             else:
-                bubble_bg = c["card_alt"]
-                border = rgba(c["border"], 0.5)
+                bubble_bg = rgba(c["card"], 0.85)
+                border = rgba(c["border"], 0.55)
+                body_color = c["text"]
+                time_color = c["sub"]
             bubble.setStyleSheet(
-                f"QFrame {{ background: {bubble_bg}; border: 1px solid {border}; border-radius: 14px; }}"
+                f"QFrame {{ background: {bubble_bg}; border: 1px solid {border}; border-radius: 18px; }}"
             )
             bubble.setMaximumWidth(520)
             bubble_layout = QVBoxLayout(bubble)
@@ -564,13 +1671,13 @@ class TeamPage(QWidget):
             stamp = self._format_chat_time(created_at)
             if stamp:
                 time_lbl = QLabel(stamp)
-                time_lbl.setStyleSheet(f"font-size: 9px; color: {c['sub']};")
+                time_lbl.setStyleSheet(f"font-size: 9px; color: {time_color};")
                 header.addWidget(time_lbl)
             bubble_layout.addLayout(header)
 
             body = QLabel(text or "")
             body.setWordWrap(True)
-            body.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {c['text']};")
+            body.setStyleSheet(f"font-size: 11px; font-weight: 650; color: {body_color};")
             bubble_layout.addWidget(body)
 
             wrapper = QWidget()
@@ -617,21 +1724,85 @@ class TeamPage(QWidget):
         self.refresh_teams()
 
     def join_team(self):
-        code, ok = self._prompt_text("Join Team", "Join code")
+        code, ok = self._prompt_text("Request Access", "Join code")
         if not ok or not code:
             return
         try:
-            api_join_team(code)
+            res = api_join_team(code)
         except ApiError as e:
             QMessageBox.warning(self, "Join Team", str(e))
             return
+        status = res.get("status") if isinstance(res, dict) else None
+        if str(status or "").strip().lower() == "pending":
+            QMessageBox.information(self, "Request Sent", "Your access request was sent. Wait for the team admin to accept it.")
+            return
         self.refresh_teams()
+
+    def invite_member(self):
+        if not self.current_team_id:
+            QMessageBox.information(self, "Invite Member", "Please select a team first.")
+            return
+        if not self._is_team_admin():
+            QMessageBox.information(self, "Invite Member", "Only the team admin can invite members.")
+            return
+        existing_ids = set((self._members_by_id or {}).keys())
+        _TeamInviteDialog(
+            self,
+            team_id=int(self.current_team_id),
+            theme=self.current_theme,
+            existing_member_ids=existing_ids,
+            current_user_id=self._current_user_id(),
+            on_members_changed=self.refresh_members,
+        ).exec()
+
+    def open_join_requests(self):
+        if not self.current_team_id:
+            QMessageBox.information(self, "Access Requests", "Please select a team first.")
+            return
+        if not self._is_team_admin():
+            QMessageBox.information(self, "Access Requests", "Only the team admin can manage access requests.")
+            return
+        _TeamJoinRequestsDialog(
+            self,
+            team_id=int(self.current_team_id),
+            theme=self.current_theme,
+            on_members_changed=self.refresh_members,
+        ).exec()
+
+    def open_analytics(self):
+        if not self.current_team_id:
+            QMessageBox.information(self, "Analytics", "Please select a team first.")
+            return
+        try:
+            res = api_team_analytics(int(self.current_team_id))
+        except ApiError as e:
+            QMessageBox.warning(self, "Analytics", str(e))
+            return
+        except Exception:
+            return
+        team_name = ""
+        try:
+            team_name = self.team_combo.currentText()
+        except Exception:
+            team_name = ""
+        _TeamAnalyticsDialog(self, theme=self.current_theme, team_name=team_name, data=res if isinstance(res, dict) else {}).exec()
 
     def add_task(self):
         if not self.current_team_id:
             QMessageBox.information(self, "Team Tasks", "Please select a team first.")
             return
-        dlg = AddTaskDialog(self, "New Team Task", theme=self.current_theme)
+        can_assign = self._can_assign_tasks()
+        assignees = []
+        if can_assign:
+            assignees = sorted([(uid, name) for uid, name in (self._members_by_id or {}).items()], key=lambda p: p[1].lower())
+        dlg = AddTaskDialog(
+            self,
+            "New Team Task",
+            theme=self.current_theme,
+            enable_recurrence=False,
+            enable_assignment=can_assign,
+            assignees=assignees if can_assign else None,
+        )
         if dlg.exec():
             data = dlg.get_data()
             if not data["title"]:
@@ -645,6 +1816,7 @@ class TeamPage(QWidget):
                     data.get("date"),
                     data.get("important"),
                     data.get("task_type"),
+                    assigned_to=data.get("assigned_to") if can_assign else None,
                 )
             except ApiError as e:
                 QMessageBox.warning(self, "Team Tasks", str(e))
@@ -666,6 +1838,9 @@ class TeamPage(QWidget):
     def delete_task(self, task_id):
         if not self.current_team_id or not task_id:
             return
+        if str(self._current_role or "").strip().lower() != "owner":
+            QMessageBox.information(self, "Team Tasks", "Only the team admin can delete team tasks.")
+            return
         try:
             api_delete_team_task(self.current_team_id, task_id)
         except ApiError as e:
@@ -673,16 +1848,28 @@ class TeamPage(QWidget):
         self.refresh_tasks()
 
     def edit_task(self, t_id):
+        if str(self._current_role or "").strip().lower() != "owner":
+            QMessageBox.information(self, "Team Tasks", "Only the team admin can edit team tasks.")
+            return
         task = self._tasks_cache.get(t_id)
         if not task:
             return
-        dlg = AddTaskDialog(self, "Edit Team Task", theme=self.current_theme)
+        assignees = sorted([(uid, name) for uid, name in (self._members_by_id or {}).items()], key=lambda p: p[1].lower())
+        dlg = AddTaskDialog(
+            self,
+            "Edit Team Task",
+            theme=self.current_theme,
+            enable_recurrence=False,
+            enable_assignment=True,
+            assignees=assignees,
+        )
         dlg.load_data(
             task.get("title") or "",
             task.get("description") or "",
             task.get("due_date") or "",
             bool(task.get("is_important")),
             task.get("task_type"),
+            assigned_to=task.get("assigned_to"),
         )
         if dlg.exec():
             data = dlg.get_data()
@@ -695,6 +1882,7 @@ class TeamPage(QWidget):
                     due_date=data.get("date"),
                     is_important=data.get("important"),
                     task_type=data.get("task_type"),
+                    assigned_to=data.get("assigned_to"),
                 )
             except ApiError as e:
                 QMessageBox.warning(self, "Team Tasks", str(e))
@@ -765,18 +1953,21 @@ class TeamPage(QWidget):
             finally:
                 if conn:
                     conn.close()
-        ViewTaskDialog(
-            task.get("title") or "",
-            task.get("description") or "",
-            due_pretty,
-            created_pretty,
-            priority,
-            task_type,
-            total_focus_min,
-            total_sessions,
-            sessions_widgets,
+        if not self.current_team_id:
+            return
+        _TeamTaskDetailsDialog(
             self,
+            team_id=int(self.current_team_id),
+            task=task,
+            priority=priority,
+            task_type=task_type,
+            due_pretty=due_pretty,
+            created_pretty=created_pretty,
+            total_focus_min=total_focus_min,
+            total_sessions=total_sessions,
+            sessions_widgets=sessions_widgets,
             theme=self.current_theme,
+            members_by_id=self._members_by_id,
         ).exec()
 
     def start_pomodoro(self, t_id, title, priority=None, task_type=None):
@@ -798,6 +1989,15 @@ class TeamPage(QWidget):
             is_urg = self._deadline_is_urgent(task.get("due_date"))
         priority = task.get("priority") or quadrant_from_flags(is_urg, is_imp)
         task_type = normalize_task_type(task.get("task_type"))
+        assignee = None
+        assigned_to = task.get("assigned_to")
+        try:
+            assigned_to_int = int(assigned_to) if assigned_to is not None else None
+        except Exception:
+            assigned_to_int = None
+        if assigned_to_int is not None:
+            assignee = (self._members_by_id or {}).get(assigned_to_int) or f"User {assigned_to_int}"
+        extra_meta = f"Assigned to: {assignee}" if assignee else "Unassigned"
         card = TaskCard(
             task.get("id"),
             task.get("title") or "",
@@ -809,8 +2009,15 @@ class TeamPage(QWidget):
             self,
             bool(task.get("is_completed")),
             task_type,
+            extra_meta=extra_meta,
         )
         card.update_theme(self.current_theme)
+        is_admin = str(self._current_role or "").strip().lower() == "owner"
+        try:
+            card.btn_edit.setVisible(bool(is_admin))
+            card.btn_del.setVisible(bool(is_admin))
+        except Exception:
+            pass
         return card
 
     def _pretty_due(self, due_date_str):

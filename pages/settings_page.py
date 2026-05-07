@@ -5,11 +5,18 @@ import subprocess
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, 
                              QPushButton, QMessageBox, QFrame, QHBoxLayout, 
-                             QScrollArea, QCheckBox, QLineEdit)
+                             QScrollArea, QCheckBox, QLineEdit, QColorDialog, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty
 from PyQt6.QtGui import QPainter, QColor
 from resources.theme import get_theme, FONT_FAMILY, rgba
-from resources.api_client import check_server_ready, set_base_url
+from resources.api_client import (
+    check_server_ready,
+    get_project_root,
+    get_project_settings_path,
+    normalize_base_url,
+    set_base_url,
+)
+from resources.server_manager import start_managed_server
 from resources.task_types import TASK_TYPES, UNCATEGORIZED_LABEL
 
 # --- CUSTOM TOGGLE SWITCH CLASS ---
@@ -174,6 +181,25 @@ class SettingsPage(QWidget):
         
         theme_layout.addWidget(lbl_theme)
         theme_layout.addWidget(self.combo_theme)
+
+        lbl_colors = QLabel("Accent colors")
+        lbl_colors.setObjectName("SettingsLabel")
+        lbl_colors.setStyleSheet("font-size: 14px; font-weight: bold;")
+        theme_layout.addWidget(lbl_colors)
+
+        colors_row = QHBoxLayout()
+        colors_row.setSpacing(10)
+        self.btn_accent_color = QPushButton("#3078CD")
+        self.btn_accent_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_accent_color.clicked.connect(lambda: self.pick_theme_color("accent"))
+        colors_row.addWidget(self.btn_accent_color)
+
+        self.btn_accent2_color = QPushButton("#82AFF2")
+        self.btn_accent2_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_accent2_color.clicked.connect(lambda: self.pick_theme_color("accent2"))
+        colors_row.addWidget(self.btn_accent2_color)
+
+        theme_layout.addLayout(colors_row)
         self.content_layout.addWidget(self.card_theme)
 
 
@@ -256,6 +282,41 @@ class SettingsPage(QWidget):
         result_sound = self.create_toggle_row("Sound effects", "Play sound when timer completes")
         self.toggle_sound = result_sound['toggle']
         general_layout.addLayout(result_sound['layout'])
+
+        # Pomodoro playlist URL
+        lbl_playlist = QLabel("Pomodoro playlist URL")
+        lbl_playlist.setObjectName("SettingsLabel")
+        lbl_playlist.setStyleSheet("font-size: 14px; font-weight: bold;")
+        general_layout.addWidget(lbl_playlist)
+
+        self.input_pomodoro_playlist_url = QLineEdit()
+        self.input_pomodoro_playlist_url.setPlaceholderText("https://… (Spotify/YouTube/etc.)")
+        self.input_pomodoro_playlist_url.setMinimumHeight(40)
+        general_layout.addWidget(self.input_pomodoro_playlist_url)
+
+        # Background audio file (white noise / music)
+        lbl_bg_audio = QLabel("Pomodoro background audio file")
+        lbl_bg_audio.setObjectName("SettingsLabel")
+        lbl_bg_audio.setStyleSheet("font-size: 14px; font-weight: bold;")
+        general_layout.addWidget(lbl_bg_audio)
+
+        bg_row = QHBoxLayout()
+        self.input_pomodoro_bg_audio = QLineEdit()
+        self.input_pomodoro_bg_audio.setPlaceholderText("Select an audio file (mp3/wav/…)")
+        self.input_pomodoro_bg_audio.setMinimumHeight(40)
+        bg_row.addWidget(self.input_pomodoro_bg_audio, 1)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_browse.clicked.connect(self.browse_pomodoro_audio)
+        bg_row.addWidget(btn_browse)
+        general_layout.addLayout(bg_row)
+
+        result_bg_audio = self.create_toggle_row(
+            "Auto-play background audio",
+            "Play the selected file during focus sessions",
+        )
+        self.toggle_pomodoro_bg_audio = result_bg_audio["toggle"]
+        general_layout.addLayout(result_bg_audio["layout"])
 
         self.content_layout.addWidget(self.card_general)
 
@@ -348,8 +409,52 @@ class SettingsPage(QWidget):
         
         return {'layout': row_layout, 'toggle': toggle}
 
+    def _apply_color_button(self, btn, color_hex):
+        color_hex = str(color_hex or "").strip()
+        if not (color_hex.startswith("#") and len(color_hex) == 7):
+            return
+        btn.setText(color_hex.upper())
+        try:
+            c = QColor(color_hex)
+            # Simple contrast heuristic
+            text = "#0B132B" if (c.red() * 0.299 + c.green() * 0.587 + c.blue() * 0.114) > 160 else "#ffffff"
+        except Exception:
+            text = "#ffffff"
+        btn.setStyleSheet(
+            f"QPushButton {{ background-color: {color_hex}; color: {text}; border-radius: 10px; padding: 10px 12px; font-weight: 900; }}"
+            f"QPushButton:hover {{ border: 2px solid {rgba(color_hex, 160)}; }}"
+        )
+
+    def pick_theme_color(self, which):
+        which = str(which or "").strip().lower()
+        if which not in ("accent", "accent2"):
+            return
+        btn = self.btn_accent_color if which == "accent" else self.btn_accent2_color
+        current = btn.text() if hasattr(btn, "text") else ""
+        try:
+            start = QColor(current) if current else QColor("#3078CD")
+        except Exception:
+            start = QColor("#3078CD")
+        chosen = QColorDialog.getColor(start, self, "Select color")
+        if not chosen or not chosen.isValid():
+            return
+        self._apply_color_button(btn, chosen.name().upper())
+
+    def browse_pomodoro_audio(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select background audio",
+            "",
+            "Audio Files (*.mp3 *.wav *.ogg *.flac);;All Files (*)",
+        )
+        if path:
+            try:
+                self.input_pomodoro_bg_audio.setText(path)
+            except Exception:
+                pass
+
     def get_settings_path(self):
-        return os.path.join(os.getcwd(), "settings.json")
+        return get_project_settings_path()
 
     def load_current_setting(self):
         try:
@@ -362,6 +467,9 @@ class SettingsPage(QWidget):
                     theme = data.get("theme", "Light")
                     idx = self.combo_theme.findText(theme)
                     if idx >= 0: self.combo_theme.setCurrentIndex(idx)
+                    if hasattr(self, "btn_accent_color") and hasattr(self, "btn_accent2_color"):
+                        self._apply_color_button(self.btn_accent_color, data.get("accent_color") or "#3078CD")
+                        self._apply_color_button(self.btn_accent2_color, data.get("accent2_color") or "#82AFF2")
 
                     # Default important
                     if "default_important" in data:
@@ -380,6 +488,12 @@ class SettingsPage(QWidget):
                     self.toggle_notify.setChecked(data.get("enable_notifications", True))
                     self.toggle_autostart.setChecked(data.get("auto_start_pomodoro", False))
                     self.toggle_sound.setChecked(data.get("sound_effects", True))
+                    if hasattr(self, "input_pomodoro_playlist_url"):
+                        self.input_pomodoro_playlist_url.setText(str(data.get("pomodoro_playlist_url", "") or "").strip())
+                    if hasattr(self, "input_pomodoro_bg_audio"):
+                        self.input_pomodoro_bg_audio.setText(str(data.get("pomodoro_background_audio_path", "") or "").strip())
+                    if hasattr(self, "toggle_pomodoro_bg_audio"):
+                        self.toggle_pomodoro_bg_audio.setChecked(bool(data.get("pomodoro_auto_play_background_audio", False)))
 
                     type_filters = data.get("task_type_filters")
                     if isinstance(type_filters, list) and type_filters:
@@ -410,8 +524,17 @@ class SettingsPage(QWidget):
             "sound_effects": self.toggle_sound.isChecked(),
             "task_type_filters": [label for label, cb in self.type_checks.items() if cb.isChecked()],
         }
+        if hasattr(self, "btn_accent_color") and hasattr(self, "btn_accent2_color"):
+            data["accent_color"] = str(self.btn_accent_color.text() or "").strip()
+            data["accent2_color"] = str(self.btn_accent2_color.text() or "").strip()
+        if hasattr(self, "input_pomodoro_playlist_url"):
+            data["pomodoro_playlist_url"] = str(self.input_pomodoro_playlist_url.text() or "").strip()
+        if hasattr(self, "input_pomodoro_bg_audio"):
+            data["pomodoro_background_audio_path"] = str(self.input_pomodoro_bg_audio.text() or "").strip()
+        if hasattr(self, "toggle_pomodoro_bg_audio"):
+            data["pomodoro_auto_play_background_audio"] = bool(self.toggle_pomodoro_bg_audio.isChecked())
         if hasattr(self, "input_cloud_url"):
-            data["cloud_base_url"] = self.input_cloud_url.text().strip()
+            data["cloud_base_url"] = normalize_base_url(self.input_cloud_url.text().strip())
         
         json_path = self.get_settings_path()
         try:
@@ -541,9 +664,9 @@ class SettingsPage(QWidget):
 
     def _is_local_url(self, url):
         try:
-            parsed = urlparse(url)
+            parsed = urlparse(normalize_base_url(url or ""))
             host = parsed.hostname or ""
-            return host in ("127.0.0.1", "localhost")
+            return host in ("127.0.0.1", "localhost", "0.0.0.0")
         except Exception:
             return False
 
@@ -553,6 +676,7 @@ class SettingsPage(QWidget):
             url = self.input_cloud_url.text().strip()
         if not url:
             url = "http://127.0.0.1:8000"
+        url = normalize_base_url(url)
 
         if not self._is_local_url(url):
             QMessageBox.information(
@@ -574,7 +698,8 @@ class SettingsPage(QWidget):
             QMessageBox.information(self, "Server", "Server is already running.")
             return
 
-        server_path = os.path.join(os.getcwd(), "server", "main.py")
+        project_root = get_project_root()
+        server_path = os.path.join(project_root, "server", "main.py")
         if not os.path.exists(server_path):
             QMessageBox.warning(self, "Server", "Server entrypoint not found (server/main.py).")
             return
@@ -587,15 +712,27 @@ class SettingsPage(QWidget):
                 creationflags = 0
 
         try:
-            subprocess.Popen(
-                [sys.executable, server_path],
-                cwd=os.getcwd(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            parsed = urlparse(url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 8000
+            if host in ("localhost", "0.0.0.0"):
+                host = "127.0.0.1"
+
+            log_path = os.path.join(project_root, "server", "server.log")
+            start_managed_server(
+                server_path=server_path,
+                cwd=project_root,
+                host=host,
+                port=int(port),
+                log_path=log_path,
+                python_exe=sys.executable,
                 creationflags=creationflags,
             )
             if hasattr(self, "server_status"):
                 self.server_status.setText("Server status: starting...")
-            QMessageBox.information(self, "Server", "Server started. Please try login again in a few seconds.")
+            msg = "Server started. Please try login again in a few seconds."
+            if os.path.exists(log_path):
+                msg += "\n\nLogs: server/server.log"
+            QMessageBox.information(self, "Server", msg)
         except Exception as e:
             QMessageBox.warning(self, "Server", f"Could not start server: {e}")

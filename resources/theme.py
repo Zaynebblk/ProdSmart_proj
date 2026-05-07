@@ -65,6 +65,12 @@ PALETTE_DARK = {
 
 def get_theme(theme_name):
     base = PALETTE_DARK if theme_name == "Dark" else PALETTE_LIGHT
+    base = dict(base)
+    overrides = _load_theme_overrides()
+    if overrides.get("accent"):
+        base["accent"] = overrides["accent"]
+    if overrides.get("accent2"):
+        base["accent2"] = overrides["accent2"]
     is_dark = theme_name == "Dark"
     primary_grad = (
         f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
@@ -105,3 +111,47 @@ def get_theme(theme_name):
         "primary_soft_border": rgba(base["accent"], 0.35 if is_dark else 0.25),
     }
     return colors
+import json
+import os
+
+
+_THEME_OVERRIDE_CACHE = None
+_THEME_OVERRIDE_MTIME = None
+
+
+def _settings_path():
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root_dir, "settings.json")
+
+
+def _load_theme_overrides():
+    global _THEME_OVERRIDE_CACHE, _THEME_OVERRIDE_MTIME
+    path = _settings_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        _THEME_OVERRIDE_CACHE = {}
+        _THEME_OVERRIDE_MTIME = None
+        return {}
+
+    if _THEME_OVERRIDE_CACHE is not None and _THEME_OVERRIDE_MTIME == mtime:
+        return _THEME_OVERRIDE_CACHE
+
+    data = {}
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+
+    overrides = {}
+    accent = str(data.get("accent_color") or "").strip()
+    accent2 = str(data.get("accent2_color") or "").strip()
+    if accent.startswith("#") and len(accent) == 7:
+        overrides["accent"] = accent
+    if accent2.startswith("#") and len(accent2) == 7:
+        overrides["accent2"] = accent2
+
+    _THEME_OVERRIDE_CACHE = overrides
+    _THEME_OVERRIDE_MTIME = mtime
+    return overrides
